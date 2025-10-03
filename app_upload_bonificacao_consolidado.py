@@ -45,7 +45,7 @@ except KeyError as e:
 # ===========================
 # CONFIGURAÇÃO DE PASTAS
 # ===========================
-PASTA_CONSOLIDADO = "Documentos Compartilhados/Bonificacao/FonteDeDados"
+PASTA_CONSOLIDADO = "Documentos Compartilhados/LimparAuto/FontedeDados"
 PASTA_ENVIOS_BACKUPS = "Documentos Compartilhados/PlanilhasEnviadas_Backups/Bonificacao"
 ARQUIVO_LOCK = "sistema_lock_bonificacao.json"
 TIMEOUT_LOCK_MINUTOS = 10
