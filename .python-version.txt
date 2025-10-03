@@ -1,0 +1,5 @@
+cd upload_dados_bonificacao_limpar
+echo "3.11" > .python-version
+git add .python-version
+git commit -m "Force Python 3.11"
+git push
