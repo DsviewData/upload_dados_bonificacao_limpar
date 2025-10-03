@@ -12,8 +12,10 @@ import time
 # ===========================
 # CONFIGURAÇÕES DE VERSÃO
 # ===========================
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 VERSION_DATE = "2025-10-03"
+APP_TITLE = "Sistema de Bonificações"
+APP_SUBTITLE = "Substituição completa do arquivo consolidado"
 
 # ===========================
 # CONFIGURAÇÃO DE LOGGING
@@ -22,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ===========================
-# CREDENCIAIS VIA ST.SECRETS - COM VERIFICAÇÃO
+# CREDENCIAIS VIA ST.SECRETS
 # ===========================
 CREDENCIAIS_OK = False
 CREDENCIAL_FALTANDO = ""
@@ -35,8 +37,10 @@ try:
     SITE_ID = st.secrets["SITE_ID"]
     DRIVE_ID = st.secrets["DRIVE_ID"]
     CREDENCIAIS_OK = True
+    logger.info("Credenciais carregadas com sucesso")
 except KeyError as e:
     CREDENCIAL_FALTANDO = str(e)
+    logger.error(f"Credencial faltando: {e}")
 
 # ===========================
 # CONFIGURAÇÃO DE PASTAS
@@ -50,6 +54,7 @@ TIMEOUT_LOCK_MINUTOS = 10
 # ESTILOS CSS
 # ===========================
 def aplicar_estilos_css():
+    """Aplica estilos CSS customizados"""
     st.markdown("""
     <style>
     :root {
@@ -94,36 +99,24 @@ def aplicar_estilos_css():
         background: linear-gradient(135deg, #fff0f0, #ffffff);
     }
     
-    .metric-container {
+    .metric-box {
         background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
+        padding: 1rem;
+        border-radius: 8px;
         text-align: center;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-        border-top: 3px solid var(--primary-color);
-    }
-    
-    .metric-value {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: var(--primary-color);
-        margin: 0.5rem 0;
-    }
-    
-    .metric-label {
-        font-size: 0.9rem;
-        color: #2C3E50;
-        font-weight: 500;
-        text-transform: uppercase;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
     }
     </style>
     """, unsafe_allow_html=True)
 
 # ===========================
-# AUTENTICAÇÃO - SEM CACHE PROBLEMÁTICO
+# AUTENTICAÇÃO
 # ===========================
 def obter_token():
-    """Obtém token de acesso - usa session_state ao invés de cache"""
+    """
+    Obtém token de acesso do Microsoft Graph API
+    Usa session_state para cache ao invés de st.cache_data
+    """
     if 'token_cache' not in st.session_state or \
        'token_timestamp' not in st.session_state or \
        (datetime.now() - st.session_state.token_timestamp).seconds > 3000:
@@ -134,7 +127,9 @@ def obter_token():
                 authority=f"https://login.microsoftonline.com/{TENANT_ID}",
                 client_credential=CLIENT_SECRET
             )
-            result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+            result = app.acquire_token_for_client(
+                scopes=["https://graph.microsoft.com/.default"]
+            )
             
             if "access_token" not in result:
                 error_desc = result.get("error_description", "Token não obtido")
@@ -156,11 +151,13 @@ def obter_token():
 # SISTEMA DE LOCK
 # ===========================
 def gerar_id_sessao():
+    """Gera ID único para a sessão"""
     if 'session_id' not in st.session_state:
         st.session_state.session_id = str(uuid.uuid4())[:8]
     return st.session_state.session_id
 
 def verificar_lock_existente(token):
+    """Verifica se existe um lock ativo no sistema"""
     try:
         url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{ARQUIVO_LOCK}:/content"
         headers = {"Authorization": f"Bearer {token}"}
@@ -172,7 +169,7 @@ def verificar_lock_existente(token):
             agora = datetime.now()
             
             if agora - timestamp_lock > timedelta(minutes=TIMEOUT_LOCK_MINUTOS):
-                logger.info("Lock expirado - removendo")
+                logger.info("Lock expirado - removendo automaticamente")
                 remover_lock(token, force=True)
                 return False, None
             
@@ -184,7 +181,8 @@ def verificar_lock_existente(token):
         logger.error(f"Erro ao verificar lock: {e}")
         return False, None
 
-def criar_lock(token, operacao="Consolidação de bonificações"):
+def criar_lock(token, operacao="Substituição completa"):
+    """Cria um lock para bloquear outras operações"""
     try:
         session_id = gerar_id_sessao()
         
@@ -202,11 +200,18 @@ def criar_lock(token, operacao="Consolidação de bonificações"):
             "Content-Type": "application/json"
         }
         
-        response = requests.put(url, headers=headers, data=json.dumps(lock_data), timeout=10)
+        response = requests.put(
+            url, 
+            headers=headers, 
+            data=json.dumps(lock_data), 
+            timeout=10
+        )
         
         if response.status_code in [200, 201]:
-            logger.info(f"Lock criado: {session_id}")
+            logger.info(f"Lock criado com sucesso. Session ID: {session_id}")
             return True, session_id
+        
+        logger.error(f"Erro ao criar lock: {response.status_code}")
         return False, None
             
     except Exception as e:
@@ -214,14 +219,23 @@ def criar_lock(token, operacao="Consolidação de bonificações"):
         return False, None
 
 def remover_lock(token, session_id=None, force=False):
+    """Remove o lock do sistema"""
     try:
+        if not force and session_id:
+            lock_existe, lock_data = verificar_lock_existente(token)
+            if lock_existe and lock_data.get('session_id') != session_id:
+                logger.warning("Tentativa de remover lock de outra sessão")
+                return False
+        
         url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{ARQUIVO_LOCK}"
         headers = {"Authorization": f"Bearer {token}"}
         response = requests.delete(url, headers=headers, timeout=10)
         
         if response.status_code in [200, 204, 404]:
-            logger.info("Lock removido")
+            logger.info("Lock removido com sucesso")
             return True
+        
+        logger.error(f"Erro ao remover lock: {response.status_code}")
         return False
             
     except Exception as e:
@@ -229,6 +243,7 @@ def remover_lock(token, session_id=None, force=False):
         return False
 
 def exibir_status_sistema(token):
+    """Exibe o status atual do sistema de lock"""
     lock_existe, lock_data = verificar_lock_existente(token)
     
     if lock_existe:
@@ -238,7 +253,7 @@ def exibir_status_sistema(token):
         st.markdown("""
         <div class="status-card error">
             <h3>Sistema Ocupado</h3>
-            <p>Outro usuário está enviando dados no momento</p>
+            <p>Outro usuário está processando dados no momento</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -248,12 +263,21 @@ def exibir_status_sistema(token):
         with col2:
             st.metric("Operação", lock_data.get('operacao', 'N/A'))
         
+        tempo_limite = timestamp_inicio + timedelta(minutes=TIMEOUT_LOCK_MINUTOS)
+        tempo_restante = tempo_limite - datetime.now()
+        
+        if tempo_restante.total_seconds() < 0:
+            if st.button("Liberar Sistema (Forçar)", type="secondary"):
+                if remover_lock(token, force=True):
+                    st.success("Sistema liberado com sucesso")
+                    st.rerun()
+        
         return True
     else:
         st.markdown("""
         <div class="status-card success">
             <h3>Sistema Disponível</h3>
-            <p>Você pode enviar sua planilha agora</p>
+            <p>Pronto para receber sua planilha</p>
         </div>
         """, unsafe_allow_html=True)
         return False
@@ -262,6 +286,7 @@ def exibir_status_sistema(token):
 # FUNÇÕES AUXILIARES
 # ===========================
 def criar_pasta_se_nao_existir(caminho_pasta, token):
+    """Cria estrutura de pastas no OneDrive se não existir"""
     try:
         partes = caminho_pasta.split('/')
         caminho_atual = ""
@@ -289,17 +314,21 @@ def criar_pasta_se_nao_existir(caminho_pasta, token):
                     "@microsoft.graph.conflictBehavior": "rename"
                 }
                 
-                requests.post(
+                create_response = requests.post(
                     parent_url, 
                     headers={**headers, "Content-Type": "application/json"}, 
                     json=create_body,
                     timeout=10
                 )
+                
+                if create_response.status_code in [200, 201]:
+                    logger.info(f"Pasta criada: {parte}")
                     
     except Exception as e:
         logger.warning(f"Erro ao criar pastas: {e}")
 
 def upload_onedrive(nome_arquivo, conteudo_arquivo, token, tipo_arquivo="consolidado"):
+    """Faz upload de arquivo para OneDrive"""
     try:
         if tipo_arquivo == "consolidado":
             pasta_base = PASTA_CONSOLIDADO
@@ -315,13 +344,19 @@ def upload_onedrive(nome_arquivo, conteudo_arquivo, token, tipo_arquivo="consoli
         }
         response = requests.put(url, headers=headers, data=conteudo_arquivo, timeout=60)
         
-        return response.status_code in [200, 201]
+        if response.status_code in [200, 201]:
+            logger.info(f"Upload realizado com sucesso: {nome_arquivo}")
+            return True
+        else:
+            logger.error(f"Erro no upload: {response.status_code}")
+            return False
         
     except Exception as e:
         logger.error(f"Erro no upload: {e}")
         return False
 
 def baixar_arquivo_consolidado(token):
+    """Baixa o arquivo consolidado existente"""
     consolidado_nome = "bonificacao_consolidada.xlsx"
     url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{consolidado_nome}:/content"
     headers = {"Authorization": f"Bearer {token}"}
@@ -339,10 +374,11 @@ def baixar_arquivo_consolidado(token):
             return pd.DataFrame(), False
             
     except Exception as e:
-        logger.error(f"Erro ao baixar: {e}")
+        logger.error(f"Erro ao baixar arquivo consolidado: {e}")
         return pd.DataFrame(), False
 
 def salvar_arquivo_enviado(df_novo, nome_arquivo_original, token):
+    """Salva uma cópia do arquivo enviado na pasta de backups"""
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
         nome_base = nome_arquivo_original.replace(".xlsx", "").replace(".xls", "")
@@ -353,16 +389,51 @@ def salvar_arquivo_enviado(df_novo, nome_arquivo_original, token):
             df_novo.to_excel(writer, index=False, sheet_name="Dados")
         buffer.seek(0)
         
-        upload_onedrive(nome_arquivo_backup, buffer.read(), token, "backup")
-        logger.info(f"Backup salvo: {nome_arquivo_backup}")
+        sucesso = upload_onedrive(nome_arquivo_backup, buffer.read(), token, "backup")
+        
+        if sucesso:
+            logger.info(f"Backup do arquivo enviado salvo: {nome_arquivo_backup}")
+        else:
+            logger.warning(f"Não foi possível salvar backup do arquivo enviado")
             
     except Exception as e:
-        logger.error(f"Erro ao salvar backup: {e}")
+        logger.error(f"Erro ao salvar arquivo enviado: {e}")
+
+def fazer_backup_consolidado(token):
+    """Faz backup do arquivo consolidado atual antes de substituir"""
+    try:
+        df_antigo, existe = baixar_arquivo_consolidado(token)
+        
+        if existe and not df_antigo.empty:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+            nome_arquivo_backup = f"bonificacao_consolidada_backup_{timestamp}.xlsx"
+            
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_antigo.to_excel(writer, index=False, sheet_name="Dados")
+            buffer.seek(0)
+            
+            sucesso = upload_onedrive(nome_arquivo_backup, buffer.read(), token, "backup")
+            
+            if sucesso:
+                logger.info(f"Backup do consolidado criado: {nome_arquivo_backup}")
+                return True, len(df_antigo)
+            else:
+                logger.warning("Não foi possível criar backup do consolidado")
+                return False, 0
+        
+        logger.info("Nenhum arquivo consolidado anterior para fazer backup")
+        return False, 0
+            
+    except Exception as e:
+        logger.error(f"Erro ao fazer backup do consolidado: {e}")
+        return False, 0
 
 # ===========================
 # VALIDAÇÃO
 # ===========================
 def validar_dados_enviados(df):
+    """Validação rigorosa dos dados enviados"""
     erros = []
     avisos = []
     
@@ -370,16 +441,18 @@ def validar_dados_enviados(df):
         erros.append("A planilha está vazia")
         return erros, avisos
     
+    # Validar coluna LOJA
     if "LOJA" not in df.columns:
         erros.append("A planilha deve conter uma coluna 'LOJA'")
     else:
         lojas_validas = df["LOJA"].notna().sum()
         if lojas_validas == 0:
-            erros.append("Nenhuma loja válida encontrada")
+            erros.append("Nenhuma loja válida encontrada na coluna 'LOJA'")
         else:
             lojas_unicas = df["LOJA"].dropna().unique()
             avisos.append(f"Lojas encontradas: {len(lojas_unicas)}")
     
+    # Validar coluna DATA
     if "DATA" not in df.columns:
         erros.append("A planilha deve conter uma coluna 'DATA'")
     else:
@@ -387,135 +460,36 @@ def validar_dados_enviados(df):
             df_temp = df.copy()
             df_temp["DATA"] = pd.to_datetime(df_temp["DATA"], errors="coerce")
             datas_invalidas = df_temp["DATA"].isna().sum()
+            
             if datas_invalidas > 0:
                 avisos.append(f"{datas_invalidas} datas inválidas serão removidas")
-        except:
-            erros.append("Erro ao processar datas")
+            
+            if datas_invalidas == len(df_temp):
+                erros.append("Todas as datas são inválidas")
+        except Exception as e:
+            erros.append(f"Erro ao processar datas: {str(e)}")
     
     return erros, avisos
 
 # ===========================
-# CONSOLIDAÇÃO
+# CONSOLIDAÇÃO - CENÁRIO B
 # ===========================
-def adicionar_data_ultimo_envio(df_final, lojas_atualizadas):
-    try:
-        if 'DATA_ULTIMO_ENVIO' not in df_final.columns:
-            df_final['DATA_ULTIMO_ENVIO'] = pd.NaT
-        
-        data_atual = datetime.now()
-        
-        for loja in lojas_atualizadas:
-            mask = df_final['LOJA'].astype(str).str.strip().str.upper() == str(loja).strip().upper()
-            df_final.loc[mask, 'DATA_ULTIMO_ENVIO'] = data_atual
-        
-        return df_final
-        
-    except Exception as e:
-        logger.error(f"Erro ao adicionar data envio: {e}")
-        return df_final
-
-def comparar_e_atualizar_registros(df_consolidado, df_novo):
-    registros_inseridos = 0
-    registros_substituidos = 0
-    registros_removidos = 0
-    lojas_atualizadas = set()
-    
-    logger.info(f"Consolidação: {len(df_consolidado)} existentes + {len(df_novo)} novos")
-    
-    if df_consolidado.empty:
-        df_final = df_novo.copy()
-        registros_inseridos = len(df_novo)
-        lojas_atualizadas = set(df_novo['LOJA'].dropna().astype(str).str.strip().str.upper().unique())
-        df_final = adicionar_data_ultimo_envio(df_final, lojas_atualizadas)
-        return df_final, registros_inseridos, registros_substituidos, registros_removidos
-    
-    # Garantir colunas
-    colunas = df_novo.columns.tolist()
-    for col in colunas:
-        if col not in df_consolidado.columns:
-            df_consolidado[col] = None
-    
-    df_final = df_consolidado.copy()
-    
-    # Adicionar mes_ano
-    df_novo_temp = df_novo.copy()
-    df_novo_temp['mes_ano'] = df_novo_temp['DATA'].dt.to_period('M')
-    
-    df_final_temp = df_final.copy()
-    df_final_temp['mes_ano'] = df_final_temp['DATA'].dt.to_period('M')
-    
-    # Processar por loja + mes/ano
-    grupos_novos = df_novo_temp.groupby(['LOJA', 'mes_ano'])
-    
-    for (loja, periodo_grupo), grupo_df in grupos_novos:
-        if pd.isna(loja) or str(loja).strip() == '':
-            continue
-        
-        lojas_atualizadas.add(str(loja).strip().upper())
-        
-        mask_existente = (
-            (df_final_temp["mes_ano"] == periodo_grupo) &
-            (df_final_temp["LOJA"].astype(str).str.strip().str.upper() == str(loja).strip().upper())
-        )
-        
-        registros_existentes = df_final[mask_existente]
-        
-        if not registros_existentes.empty:
-            num_removidos = len(registros_existentes)
-            df_final = df_final[~mask_existente]
-            df_final_temp = df_final_temp[~mask_existente]
-            registros_removidos += num_removidos
-            registros_substituidos += len(grupo_df)
-        else:
-            registros_inseridos += len(grupo_df)
-        
-        grupo_para_inserir = grupo_df.drop(columns=['mes_ano'], errors='ignore')
-        df_final = pd.concat([df_final, grupo_para_inserir], ignore_index=True)
-        df_final_temp = pd.concat([df_final_temp, grupo_df], ignore_index=True)
-    
-    df_final = adicionar_data_ultimo_envio(df_final, lojas_atualizadas)
-    
-    logger.info(f"Resultado: {registros_inseridos} inseridos, {registros_substituidos} substituídos")
-    
-    return df_final, registros_inseridos, registros_substituidos, registros_removidos
-
-def analise_pre_consolidacao(df_consolidado, df_novo):
-    try:
-        st.subheader("Análise Pré-Consolidação")
-        
-        df_novo_temp = df_novo.copy()
-        df_novo_temp['mes_ano'] = df_novo_temp['DATA'].dt.to_period('M')
-        
-        lojas_novas = set(df_novo['LOJA'].dropna().astype(str).str.strip().str.upper().unique())
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Lojas", len(lojas_novas))
-        
-        with col2:
-            st.metric("Registros Novos", len(df_novo))
-        
-        with col3:
-            periodos_unicos = df_novo_temp.groupby(['LOJA', 'mes_ano']).size()
-            st.metric("Períodos", len(periodos_unicos))
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Erro na análise: {e}")
-        st.error(f"Erro na análise: {str(e)}")
-        return False
-
-def processar_consolidacao_com_lock(df_novo, nome_arquivo, token):
+def processar_substituicao_completa(df_novo, nome_arquivo, token):
+    """
+    CENÁRIO B: Substitui COMPLETAMENTE o arquivo consolidado
+    - Deleta todos os dados anteriores
+    - Cria arquivo novo com apenas os dados enviados
+    - Adiciona campo DATA_ULTIMO_ENVIO
+    - Faz backup automático antes de substituir
+    """
     session_id = gerar_id_sessao()
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        status_text.info("Iniciando consolidação...")
-        progress_bar.progress(10)
+        status_text.info("Iniciando substituição completa...")
+        progress_bar.progress(5)
         
         # Verificar lock
         sistema_ocupado, _ = verificar_lock_existente(token)
@@ -525,65 +499,74 @@ def processar_consolidacao_com_lock(df_novo, nome_arquivo, token):
         
         # Criar lock
         status_text.info("Bloqueando sistema...")
-        progress_bar.progress(15)
+        progress_bar.progress(10)
         
-        lock_criado, session_lock = criar_lock(token)
+        lock_criado, session_lock = criar_lock(token, "Substituição completa do consolidado")
         if not lock_criado:
             status_text.error("Não foi possível bloquear o sistema")
             return False
         
-        # Baixar consolidado
-        status_text.info("Baixando arquivo consolidado...")
-        progress_bar.progress(30)
+        # Fazer backup do consolidado atual
+        status_text.info("Fazendo backup do arquivo atual...")
+        progress_bar.progress(20)
         
-        df_consolidado, arquivo_existe = baixar_arquivo_consolidado(token)
+        backup_feito, registros_antigos = fazer_backup_consolidado(token)
+        if backup_feito:
+            st.info(f"Backup criado: {registros_antigos} registros salvos")
         
-        # Preparar dados
+        # Preparar dados novos
         status_text.info("Preparando dados...")
-        progress_bar.progress(40)
+        progress_bar.progress(35)
         
         df_novo = df_novo.copy()
         df_novo.columns = df_novo.columns.str.strip().str.upper()
+        
+        # Converter datas
         df_novo["DATA"] = pd.to_datetime(df_novo["DATA"], errors="coerce")
+        linhas_invalidas = df_novo["DATA"].isna().sum()
         df_novo = df_novo.dropna(subset=["DATA"])
         
         if df_novo.empty:
-            status_text.error("Nenhum registro válido")
+            status_text.error("Nenhum registro válido após limpeza de datas")
             remover_lock(token, session_lock)
             return False
         
-        # Análise
-        status_text.info("Analisando dados...")
+        if linhas_invalidas > 0:
+            st.warning(f"{linhas_invalidas} linhas com datas inválidas foram removidas")
+        
+        # ADICIONAR CAMPO DATA_ULTIMO_ENVIO
+        status_text.info("Adicionando campo DATA_ULTIMO_ENVIO...")
         progress_bar.progress(50)
-        analise_pre_consolidacao(df_consolidado, df_novo)
         
-        # Consolidar
-        status_text.info("Consolidando...")
-        progress_bar.progress(70)
+        data_envio = datetime.now()
+        df_novo['DATA_ULTIMO_ENVIO'] = data_envio
         
-        df_final, inseridos, substituidos, removidos = comparar_e_atualizar_registros(
-            df_consolidado, df_novo
-        )
+        logger.info(f"Campo DATA_ULTIMO_ENVIO adicionado: {data_envio.strftime('%d/%m/%Y %H:%M:%S')}")
         
-        df_final = df_final.sort_values(["DATA", "LOJA"], na_position='last').reset_index(drop=True)
+        # Ordenar dados
+        df_novo = df_novo.sort_values(
+            ["DATA", "LOJA"], 
+            na_position='last'
+        ).reset_index(drop=True)
         
-        # Salvar backup
-        status_text.info("Salvando backup...")
-        progress_bar.progress(85)
+        # Salvar cópia do arquivo enviado
+        status_text.info("Salvando cópia do arquivo enviado...")
+        progress_bar.progress(65)
         salvar_arquivo_enviado(df_novo, nome_arquivo, token)
         
-        # Upload final
-        status_text.info("Salvando consolidado...")
-        progress_bar.progress(90)
+        # Upload do novo consolidado (SUBSTITUIÇÃO TOTAL)
+        status_text.info("Salvando novo arquivo consolidado...")
+        progress_bar.progress(80)
         
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_final.to_excel(writer, index=False, sheet_name="Dados")
+            df_novo.to_excel(writer, index=False, sheet_name="Dados")
         buffer.seek(0)
         
-        sucesso = upload_onedrive("bonificacao_consolidada.xlsx", buffer.read(), token)
+        sucesso = upload_onedrive("bonificacao_consolidada.xlsx", buffer.read(), token, "consolidado")
         
         # Remover lock
+        progress_bar.progress(95)
         remover_lock(token, session_lock)
         progress_bar.progress(100)
         
@@ -591,55 +574,86 @@ def processar_consolidacao_com_lock(df_novo, nome_arquivo, token):
             status_text.empty()
             progress_bar.empty()
             
-            st.success("Consolidação realizada com sucesso!")
+            # Mensagem de sucesso
+            st.success("Substituição completa realizada com sucesso!")
             
-            col1, col2, col3, col4 = st.columns(4)
+            if backup_feito:
+                st.warning(f"O arquivo consolidado anterior ({registros_antigos} registros) foi substituído e salvo em backup")
+            else:
+                st.info("Arquivo consolidado criado (não havia arquivo anterior)")
+            
+            # Métricas do resultado
+            st.markdown("### Resultado da Operação")
+            
+            col1, col2, col3 = st.columns(3)
+            
             with col1:
-                st.metric("Total Final", f"{len(df_final):,}")
-            with col2:
-                st.metric("Inseridos", inseridos)
-            with col3:
-                st.metric("Substituídos", substituidos)
-            with col4:
-                st.metric("Removidos", removidos)
+                st.metric("Total de Registros", f"{len(df_novo):,}")
             
-            if not df_final.empty and 'LOJA' in df_final.columns:
-                resumo = df_final.groupby("LOJA").agg({
+            with col2:
+                if "LOJA" in df_novo.columns:
+                    lojas_total = df_novo["LOJA"].dropna().nunique()
+                    st.metric("Total de Lojas", lojas_total)
+            
+            with col3:
+                st.metric("Data do Envio", data_envio.strftime("%d/%m/%Y %H:%M"))
+            
+            # Informação sobre o campo DATA_ULTIMO_ENVIO
+            st.info(f"Campo 'DATA_ULTIMO_ENVIO' adicionado com sucesso em todos os {len(df_novo)} registros")
+            
+            # Resumo por loja
+            if not df_novo.empty and 'LOJA' in df_novo.columns:
+                st.markdown("### Resumo por Loja")
+                
+                resumo = df_novo.groupby("LOJA").agg({
                     "DATA": ["count", "min", "max"]
                 })
-                resumo.columns = ["Total", "Data Inicial", "Data Final"]
+                resumo.columns = ["Total Registros", "Data Inicial", "Data Final"]
                 
-                with st.expander("Resumo por Loja"):
-                    st.dataframe(resumo, use_container_width=True)
+                # Formatar datas
+                resumo["Data Inicial"] = pd.to_datetime(resumo["Data Inicial"]).dt.strftime("%d/%m/%Y")
+                resumo["Data Final"] = pd.to_datetime(resumo["Data Final"]).dt.strftime("%d/%m/%Y")
+                
+                st.dataframe(resumo, use_container_width=True)
+            
+            # Localização dos arquivos
+            with st.expander("Localização dos Arquivos"):
+                st.info(f"**Arquivo Consolidado:**\n`{PASTA_CONSOLIDADO}/bonificacao_consolidada.xlsx`")
+                st.info(f"**Backups:**\n`{PASTA_ENVIOS_BACKUPS}/`")
             
             return True
         else:
-            status_text.error("Erro ao salvar arquivo")
+            status_text.error("Erro ao salvar arquivo consolidado")
             return False
             
     except Exception as e:
-        logger.error(f"Erro na consolidação: {e}")
+        logger.error(f"Erro na substituição completa: {e}")
         remover_lock(token, session_id, force=True)
-        status_text.error(f"Erro: {str(e)}")
+        status_text.error(f"Erro durante o processo: {str(e)}")
         progress_bar.empty()
+        st.error("Sistema liberado automaticamente após erro")
         return False
 
 # ===========================
 # INTERFACE PRINCIPAL
 # ===========================
 def main():
+    """Função principal da aplicação"""
+    
     st.set_page_config(
-        page_title=f"Bonificações v{APP_VERSION}", 
+        page_title=f"{APP_TITLE} v{APP_VERSION}", 
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state="expanded",
+        page_icon="📊"
     )
 
     aplicar_estilos_css()
 
+    # Header principal
     st.markdown(f"""
     <div class="main-header">
-        <h1>Sistema de Consolidação de Bonificações</h1>
-        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Upload e consolidação automática por Loja + Mês/Ano</p>
+        <h1>{APP_TITLE}</h1>
+        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">{APP_SUBTITLE}</p>
         <small>Versão {APP_VERSION} - {VERSION_DATE}</small>
     </div>
     """, unsafe_allow_html=True)
@@ -654,10 +668,12 @@ TENANT_ID
 EMAIL_ONEDRIVE
 SITE_ID
 DRIVE_ID""")
-        st.info("Vá em: Manage app > Settings > Secrets")
+        st.info("Vá em: Manage app → Settings → Secrets")
         st.stop()
 
+    # Sidebar
     st.sidebar.markdown("### Upload de Bonificações")
+    st.sidebar.markdown(f"**Versão:** {APP_VERSION}")
     st.sidebar.divider()
 
     # Obter token
@@ -666,10 +682,10 @@ DRIVE_ID""")
     
     if not token:
         st.error("Erro de autenticação. Verifique as credenciais nas secrets.")
-        st.sidebar.error("Desconectado")
+        st.sidebar.error("❌ Desconectado")
         st.stop()
     
-    st.sidebar.success("Conectado")
+    st.sidebar.success("✅ Conectado")
 
     # Status do sistema
     st.markdown("## Status do Sistema")
@@ -677,7 +693,7 @@ DRIVE_ID""")
     
     if sistema_ocupado:
         st.divider()
-        if st.button("Atualizar Status"):
+        if st.button("🔄 Atualizar Status"):
             st.rerun()
         st.info("Página será atualizada automaticamente em 15 segundos")
         time.sleep(15)
@@ -685,26 +701,26 @@ DRIVE_ID""")
 
     st.divider()
 
-    # Info sobre o sistema
-    with st.sidebar.expander("Informações"):
-        st.markdown(f"**Versão:** {APP_VERSION}")
-        st.markdown(f"**Data:** {VERSION_DATE}")
-        st.markdown("**Consolidado:** bonificacao_consolidada.xlsx")
+    # Avisos importantes
+    st.warning("⚠️ **ATENÇÃO:** Este sistema faz SUBSTITUIÇÃO COMPLETA do arquivo consolidado. Todos os dados anteriores serão substituídos pelos novos dados enviados.")
+    
+    st.info("""**Funcionalidades:**
+- ✅ Substitui completamente o arquivo consolidado
+- ✅ Faz backup automático antes de substituir
+- ✅ Adiciona campo DATA_ULTIMO_ENVIO em todos os registros
+- ✅ Salva cópia do arquivo enviado
+    """)
 
-    # Upload
+    # Informações do sistema
+    with st.sidebar.expander("ℹ️ Informações"):
+        st.markdown(f"**Modo:** Substituição Completa")
+        st.markdown(f"**Consolidado:** bonificacao_consolidada.xlsx")
+        st.markdown(f"**Pasta:** {PASTA_CONSOLIDADO}")
+
+    # Upload de arquivo
     st.markdown("## Upload de Planilha Excel")
     
-    st.info("A planilha deve ter uma aba 'Dados' com as colunas 'LOJA' e 'DATA'")
-    
-    with st.expander("Como funciona a consolidação", expanded=False):
-        st.markdown("""
-        **Consolidação por LOJA + MÊS/ANO:**
-        - Substitui dados mensais existentes da mesma loja
-        - Adiciona novos períodos mensais
-        - Mantém dados de outras lojas intactos
-        - Registra data do último envio por loja
-        - Cria backups automáticos
-        """)
+    st.info("📋 A planilha deve ter uma aba 'Dados' com as colunas 'LOJA' e 'DATA'")
 
     uploaded_file = st.file_uploader(
         "Escolha um arquivo Excel", 
@@ -715,26 +731,27 @@ DRIVE_ID""")
     df = None
     if uploaded_file:
         try:
-            st.success(f"Arquivo carregado: {uploaded_file.name}")
+            st.success(f"📁 Arquivo carregado: {uploaded_file.name}")
             
-            with st.spinner("Lendo arquivo..."):
+            with st.spinner("📖 Lendo arquivo..."):
                 xls = pd.ExcelFile(uploaded_file)
                 sheets = xls.sheet_names
                 
                 if "Dados" in sheets:
                     sheet = "Dados"
-                    st.success("Aba 'Dados' encontrada automaticamente")
+                    st.success("✅ Aba 'Dados' encontrada automaticamente")
                 else:
                     sheet = st.selectbox("Selecione a aba:", sheets)
                     if sheet != "Dados":
-                        st.warning("Recomendamos usar uma aba chamada 'Dados'")
+                        st.warning("⚠️ Recomendamos usar uma aba chamada 'Dados'")
                 
                 df = pd.read_excel(uploaded_file, sheet_name=sheet)
                 df.columns = df.columns.str.strip().str.upper()
                 
-                st.success(f"Dados carregados: {len(df)} linhas, {len(df.columns)} colunas")
+                st.success(f"✅ Dados carregados: {len(df)} linhas, {len(df.columns)} colunas")
                 
-                with st.expander("Preview dos Dados", expanded=True):
+                # Preview dos dados
+                with st.expander("👀 Preview dos Dados", expanded=True):
                     st.dataframe(df.head(10), use_container_width=True)
                     
                     col1, col2, col3 = st.columns(3)
@@ -745,54 +762,58 @@ DRIVE_ID""")
                     with col3:
                         if "LOJA" in df.columns:
                             st.metric("Lojas", df["LOJA"].dropna().nunique())
+                        else:
+                            st.metric("Lojas", "N/A")
                 
         except Exception as e:
-            st.error(f"Erro ao ler arquivo: {str(e)}")
-            logger.error(f"Erro leitura: {e}")
+            st.error(f"❌ Erro ao ler arquivo: {str(e)}")
+            logger.error(f"Erro na leitura do arquivo: {e}")
             st.stop()
 
+    # Validação e processamento
     if df is not None:
-        st.markdown("### Validação dos Dados")
+        st.markdown("### 🔍 Validação dos Dados")
         
         with st.spinner("Validando dados..."):
             erros, avisos = validar_dados_enviados(df)
         
         if erros:
-            st.error("Problemas encontrados:")
+            st.error("❌ Problemas encontrados:")
             for erro in erros:
-                st.error(f"- {erro}")
+                st.error(f"• {erro}")
             st.stop()
         else:
-            st.success("Validação aprovada!")
+            st.success("✅ Validação aprovada!")
         
         if avisos:
             for aviso in avisos:
-                st.info(aviso)
+                st.info(f"ℹ️ {aviso}")
         
         st.divider()
         
-        # Botões
+        # Botões de ação
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            if st.button("Consolidar Dados", type="primary", use_container_width=True):
-                st.warning("Consolidação iniciada! NÃO feche esta página!")
+            if st.button("⚠️ Substituir Arquivo Consolidado", type="primary", use_container_width=True):
+                st.warning("⏳ Substituição iniciada! NÃO feche esta página!")
                 
-                sucesso = processar_consolidacao_com_lock(df, uploaded_file.name, token)
+                sucesso = processar_substituicao_completa(df, uploaded_file.name, token)
                 
                 if sucesso:
                     st.balloons()
+                    st.success("🎉 Processo concluído com sucesso!")
         
         with col2:
-            if st.button("Limpar Tela", type="secondary", use_container_width=True):
+            if st.button("🔄 Limpar Tela", type="secondary", use_container_width=True):
                 st.rerun()
 
     # Footer
     st.markdown("---")
     st.markdown(f"""
     <div style="text-align: center; padding: 1rem; color: #666;">
-        <strong>Sistema de Consolidação de Bonificações v{APP_VERSION}</strong><br>
-        <small>Última atualização: {VERSION_DATE}</small>
+        <strong>{APP_TITLE} v{APP_VERSION}</strong><br>
+        <small>Modo: Substituição Completa | Última atualização: {VERSION_DATE}</small>
     </div>
     """, unsafe_allow_html=True)
 
