@@ -14,7 +14,7 @@ import time
 # ===========================
 APP_VERSION = "2.0.0"
 VERSION_DATE = "2025-11-05"
-APP_TITLE = "Sistema de Bonificações"
+APP_TITLE = "Upload da planilha de  Bonificações"
 APP_SUBTITLE = "Substituição completa do arquivo consolidado"
 
 # ===========================
@@ -808,8 +808,8 @@ DRIVE_ID""")
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            if st.button("⚠️ Substituir Arquivo Consolidado", type="primary", use_container_width=True):
-                st.warning("⏳ Substituição iniciada! NÃO feche esta página!")
+            if st.button("⚠️Consilidar dados", type="primary", use_container_width=True):
+                st.warning("⏳ Consolidação iniciada! NÃO feche esta página!")
                 
                 sucesso = processar_substituicao_completa(df, uploaded_file.name, token)
                 
