@@ -12,8 +12,8 @@ import time
 # ===========================
 # CONFIGURAÇÕES DE VERSÃO
 # ===========================
-APP_VERSION = "1.1.0"
-VERSION_DATE = "2025-10-03"
+APP_VERSION = "2.0.0"
+VERSION_DATE = "2025-11-05"
 APP_TITLE = "Sistema de Bonificações"
 APP_SUBTITLE = "Substituição completa do arquivo consolidado"
 
@@ -41,6 +41,23 @@ try:
 except KeyError as e:
     CREDENCIAL_FALTANDO = str(e)
     logger.error(f"Credencial faltando: {e}")
+
+# ===========================
+# ESTRUTURA DE COLUNAS ESPERADA
+# ===========================
+COLUNAS_OBRIGATORIAS = [
+    'GRUPO', 'CONCESSIONÁRIA', 'LOJA', 'FUNÇÃO', 'NOME', 'DATA', 
+    'FORMA PAG', 'CARTÃO / PIX',
+    'TMO_DUTO', 'R$_DUTO', 'EXTRA_DUTO', 'TOTAL_DUTO',
+    'TMO_FREIO', 'R$_FREIO', 'EXTRA_FREIO', 'TOTAL_FREIO',
+    'TMO_SANIT', 'R$_SANIT', 'EXTRA_SANIT', 'TOTAL_SANIT',
+    'TMO_VERNIZ', 'R$_VERNIZ', 'EXTRA_VERNIZ', 'TOTAL_VERNIZ',
+    'TMO_CX EVAP', 'R$_CX EVAP', 'EXTRA_CX EVAP', 'TOTAL_CX EVAP',
+    'TMO_PROTEC', 'R$_PROTEC', 'EXTRA_PROTEC', 'TOTAL_PROTEC',
+    'TMO_VC GREEN', 'R$_VC GREEN', 'EXTRA_VC GREEN', 'TOTAL_VC GREEN',
+    'TMO_NITROGÊNIO', 'R$_NITROGÊNIO', 'EXTRA_NITROGÊNIO', 'TOTAL_NITROGÊNIO',
+    'TMO_TOTAL', 'R$_TOTAL', 'STATUS', 'PAGO', 'A PAGAR', 'PIX'
+]
 
 # ===========================
 # CONFIGURAÇÃO DE PASTAS
@@ -105,6 +122,23 @@ def aplicar_estilos_css():
         border-radius: 8px;
         text-align: center;
         box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    
+    .validation-box {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .column-list {
+        max-height: 300px;
+        overflow-y: auto;
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 5px;
+        padding: 0.5rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -243,347 +277,283 @@ def remover_lock(token, session_id=None, force=False):
         return False
 
 def exibir_status_sistema(token):
-    """Exibe o status atual do sistema de lock"""
+    """Exibe status atual do sistema"""
     lock_existe, lock_data = verificar_lock_existente(token)
     
     if lock_existe:
-        timestamp_inicio = datetime.fromisoformat(lock_data['timestamp'])
-        duracao = datetime.now() - timestamp_inicio
-        
-        st.markdown("""
-        <div class="status-card error">
-            <h3>Sistema Ocupado</h3>
-            <p>Outro usuário está processando dados no momento</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown('<div class="status-card error">', unsafe_allow_html=True)
+        st.error("🔒 Sistema ocupado - Operação em andamento")
         
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Tempo Ativo", f"{int(duracao.total_seconds()//60)} min")
+            st.info(f"**Operação:** {lock_data.get('operacao', 'Desconhecida')}")
+            st.info(f"**Sessão ID:** {lock_data.get('session_id', 'N/A')}")
+        
         with col2:
-            st.metric("Operação", lock_data.get('operacao', 'N/A'))
+            timestamp = datetime.fromisoformat(lock_data.get('timestamp'))
+            tempo_decorrido = datetime.now() - timestamp
+            minutos = int(tempo_decorrido.seconds / 60)
+            st.info(f"**Iniciado há:** {minutos} minuto(s)")
+            st.info(f"**Versão:** {lock_data.get('app_version', 'N/A')}")
         
-        tempo_limite = timestamp_inicio + timedelta(minutes=TIMEOUT_LOCK_MINUTOS)
-        tempo_restante = tempo_limite - datetime.now()
-        
-        if tempo_restante.total_seconds() < 0:
-            if st.button("Liberar Sistema (Forçar)", type="secondary"):
-                if remover_lock(token, force=True):
-                    st.success("Sistema liberado com sucesso")
-                    st.rerun()
-        
+        st.markdown('</div>', unsafe_allow_html=True)
         return True
     else:
-        st.markdown("""
-        <div class="status-card success">
-            <h3>Sistema Disponível</h3>
-            <p>Pronto para receber sua planilha</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown('<div class="status-card success">', unsafe_allow_html=True)
+        st.success("✅ Sistema disponível")
+        st.markdown('</div>', unsafe_allow_html=True)
         return False
 
 # ===========================
-# FUNÇÕES AUXILIARES
+# VALIDAÇÃO DE ESTRUTURA
 # ===========================
-def criar_pasta_se_nao_existir(caminho_pasta, token):
-    """Cria estrutura de pastas no OneDrive se não existir"""
-    try:
-        partes = caminho_pasta.split('/')
-        caminho_atual = ""
-        
-        for parte in partes:
-            if not parte:
-                continue
-                
-            caminho_anterior = caminho_atual
-            caminho_atual = f"{caminho_atual}/{parte}" if caminho_atual else parte
-            
-            url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{caminho_atual}"
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            if response.status_code == 404:
-                parent_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root"
-                if caminho_anterior:
-                    parent_url += f":/{caminho_anterior}"
-                parent_url += ":/children"
-                
-                create_body = {
-                    "name": parte,
-                    "folder": {},
-                    "@microsoft.graph.conflictBehavior": "rename"
-                }
-                
-                create_response = requests.post(
-                    parent_url, 
-                    headers={**headers, "Content-Type": "application/json"}, 
-                    json=create_body,
-                    timeout=10
-                )
-                
-                if create_response.status_code in [200, 201]:
-                    logger.info(f"Pasta criada: {parte}")
-                    
-    except Exception as e:
-        logger.warning(f"Erro ao criar pastas: {e}")
-
-def upload_onedrive(nome_arquivo, conteudo_arquivo, token, tipo_arquivo="consolidado"):
-    """Faz upload de arquivo para OneDrive"""
-    try:
-        if tipo_arquivo == "consolidado":
-            pasta_base = PASTA_CONSOLIDADO
-        else:
-            pasta_base = PASTA_ENVIOS_BACKUPS
-        
-        criar_pasta_se_nao_existir(pasta_base, token)
-        
-        url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{pasta_base}/{nome_arquivo}:/content"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream"
-        }
-        response = requests.put(url, headers=headers, data=conteudo_arquivo, timeout=60)
-        
-        if response.status_code in [200, 201]:
-            logger.info(f"Upload realizado com sucesso: {nome_arquivo}")
-            return True
-        else:
-            logger.error(f"Erro no upload: {response.status_code}")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Erro no upload: {e}")
-        return False
-
 def baixar_arquivo_consolidado(token):
-    """Baixa o arquivo consolidado existente"""
-    consolidado_nome = "bonificacao_consolidada.xlsx"
-    url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{consolidado_nome}:/content"
-    headers = {"Authorization": f"Bearer {token}"}
-    
+    """Baixa o arquivo consolidado atual para comparação de estrutura"""
     try:
+        url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/bonificacao_consolidada.xlsx:/content"
+        headers = {"Authorization": f"Bearer {token}"}
         response = requests.get(url, headers=headers, timeout=30)
         
         if response.status_code == 200:
-            df_consolidado = pd.read_excel(BytesIO(response.content))
-            df_consolidado.columns = df_consolidado.columns.str.strip().str.upper()
-            logger.info(f"Arquivo consolidado baixado: {len(df_consolidado)} registros")
-            return df_consolidado, True
+            return pd.read_excel(BytesIO(response.content), sheet_name='Dados')
         else:
-            logger.info("Arquivo consolidado não existe - será criado novo")
-            return pd.DataFrame(), False
+            logger.warning(f"Arquivo consolidado não encontrado: {response.status_code}")
+            return None
             
     except Exception as e:
         logger.error(f"Erro ao baixar arquivo consolidado: {e}")
-        return pd.DataFrame(), False
+        return None
 
-def salvar_arquivo_enviado(df_novo, nome_arquivo_original, token):
-    """Salva uma cópia do arquivo enviado na pasta de backups"""
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
-        nome_base = nome_arquivo_original.replace(".xlsx", "").replace(".xls", "")
-        nome_arquivo_backup = f"{nome_base}_enviado_{timestamp}.xlsx"
+def validar_estrutura_colunas(df_novo, token):
+    """
+    Valida a estrutura de colunas do arquivo enviado
+    Retorna: (erros, avisos, info_validacao)
+    """
+    erros = []
+    avisos = []
+    info_validacao = {
+        'colunas_faltando': [],
+        'colunas_diferentes': [],
+        'colunas_novas': [],
+        'estrutura_ok': False
+    }
+    
+    # Normalizar colunas do novo arquivo
+    colunas_novo = [col.strip().upper() for col in df_novo.columns]
+    
+    # 1. Verificar colunas obrigatórias
+    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in colunas_novo]
+    
+    if colunas_faltando:
+        erros.append(f"❌ Colunas obrigatórias faltando: {', '.join(colunas_faltando)}")
+        info_validacao['colunas_faltando'] = colunas_faltando
+        return erros, avisos, info_validacao
+    
+    # 2. Baixar arquivo consolidado atual para comparar estrutura
+    df_consolidado = baixar_arquivo_consolidado(token)
+    
+    if df_consolidado is not None:
+        colunas_consolidado = [col.strip().upper() for col in df_consolidado.columns]
         
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_novo.to_excel(writer, index=False, sheet_name="Dados")
-        buffer.seek(0)
+        # Remover DATA_ULTIMO_ENVIO da comparação (é adicionada automaticamente)
+        colunas_consolidado_sem_data = [col for col in colunas_consolidado if col != 'DATA_ULTIMO_ENVIO']
         
-        sucesso = upload_onedrive(nome_arquivo_backup, buffer.read(), token, "backup")
+        # 3. Verificar mudanças nos nomes de colunas existentes
+        colunas_diferentes = []
+        for col in colunas_consolidado_sem_data:
+            if col in COLUNAS_OBRIGATORIAS and col not in colunas_novo:
+                colunas_diferentes.append(col)
         
-        if sucesso:
-            logger.info(f"Backup do arquivo enviado salvo: {nome_arquivo_backup}")
-        else:
-            logger.warning(f"Não foi possível salvar backup do arquivo enviado")
-            
-    except Exception as e:
-        logger.error(f"Erro ao salvar arquivo enviado: {e}")
+        if colunas_diferentes:
+            erros.append(f"❌ As seguintes colunas mudaram de nome ou estão ausentes: {', '.join(colunas_diferentes)}")
+            info_validacao['colunas_diferentes'] = colunas_diferentes
+            return erros, avisos, info_validacao
+        
+        # 4. Identificar novas colunas (permitidas)
+        colunas_novas = [col for col in colunas_novo if col not in colunas_consolidado_sem_data and col != 'DATA_ULTIMO_ENVIO']
+        
+        if colunas_novas:
+            avisos.append(f"ℹ️ Novas colunas detectadas (serão adicionadas): {', '.join(colunas_novas)}")
+            info_validacao['colunas_novas'] = colunas_novas
+    
+    else:
+        # Arquivo consolidado não existe ainda, apenas validar colunas obrigatórias
+        avisos.append("⚠️ Arquivo consolidado não existe. Será criado pela primeira vez.")
+        
+        # Verificar se há colunas além das obrigatórias
+        colunas_extras = [col for col in colunas_novo if col not in COLUNAS_OBRIGATORIAS and col != 'DATA_ULTIMO_ENVIO']
+        if colunas_extras:
+            avisos.append(f"ℹ️ Colunas adicionais no arquivo: {', '.join(colunas_extras)}")
+            info_validacao['colunas_novas'] = colunas_extras
+    
+    info_validacao['estrutura_ok'] = True
+    return erros, avisos, info_validacao
 
-def fazer_backup_consolidado(token):
-    """Faz backup do arquivo consolidado atual antes de substituir"""
-    try:
-        df_antigo, existe = baixar_arquivo_consolidado(token)
-        
-        if existe and not df_antigo.empty:
-            timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
-            nome_arquivo_backup = f"bonificacao_consolidada_backup_{timestamp}.xlsx"
-            
-            buffer = BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_antigo.to_excel(writer, index=False, sheet_name="Dados")
-            buffer.seek(0)
-            
-            sucesso = upload_onedrive(nome_arquivo_backup, buffer.read(), token, "backup")
-            
-            if sucesso:
-                logger.info(f"Backup do consolidado criado: {nome_arquivo_backup}")
-                return True, len(df_antigo)
-            else:
-                logger.warning("Não foi possível criar backup do consolidado")
-                return False, 0
-        
-        logger.info("Nenhum arquivo consolidado anterior para fazer backup")
-        return False, 0
-            
-    except Exception as e:
-        logger.error(f"Erro ao fazer backup do consolidado: {e}")
-        return False, 0
-
-# ===========================
-# VALIDAÇÃO
-# ===========================
-def validar_dados_enviados(df):
-    """Validação rigorosa dos dados enviados"""
+def validar_dados_enviados(df, token):
+    """
+    Valida os dados enviados
+    Retorna: (erros, avisos)
+    """
     erros = []
     avisos = []
     
-    if df.empty:
-        erros.append("A planilha está vazia")
+    # Normalizar nomes das colunas
+    df.columns = df.columns.str.strip().str.upper()
+    
+    # 1. Validar estrutura de colunas
+    erros_estrutura, avisos_estrutura, info_validacao = validar_estrutura_colunas(df, token)
+    erros.extend(erros_estrutura)
+    avisos.extend(avisos_estrutura)
+    
+    if not info_validacao['estrutura_ok']:
         return erros, avisos
     
-    # Validar coluna LOJA
-    if "LOJA" not in df.columns:
-        erros.append("A planilha deve conter uma coluna 'LOJA'")
-    else:
-        lojas_validas = df["LOJA"].notna().sum()
-        if lojas_validas == 0:
-            erros.append("Nenhuma loja válida encontrada na coluna 'LOJA'")
-        else:
-            lojas_unicas = df["LOJA"].dropna().unique()
-            avisos.append(f"Lojas encontradas: {len(lojas_unicas)}")
+    # 2. Verificar se DataFrame está vazio
+    if df.empty:
+        erros.append("Planilha está vazia")
+        return erros, avisos
     
-    # Validar coluna DATA
+    # 3. Verificar colunas essenciais para operação
+    if "LOJA" not in df.columns:
+        erros.append("Coluna 'LOJA' não encontrada")
+    
     if "DATA" not in df.columns:
-        erros.append("A planilha deve conter uma coluna 'DATA'")
-    else:
+        erros.append("Coluna 'DATA' não encontrada")
+    
+    # 4. Validações adicionais se as colunas existem
+    if "LOJA" in df.columns:
+        lojas_vazias = df["LOJA"].isna().sum()
+        if lojas_vazias > 0:
+            avisos.append(f"Existem {lojas_vazias} linha(s) sem LOJA identificada")
+    
+    if "DATA" in df.columns:
+        datas_vazias = df["DATA"].isna().sum()
+        if datas_vazias > 0:
+            avisos.append(f"Existem {datas_vazias} linha(s) sem DATA")
+        
+        # Tentar converter DATA para datetime
         try:
-            df_temp = df.copy()
-            df_temp["DATA"] = pd.to_datetime(df_temp["DATA"], errors="coerce")
-            datas_invalidas = df_temp["DATA"].isna().sum()
-            
+            df["DATA"] = pd.to_datetime(df["DATA"], errors='coerce')
+            datas_invalidas = df["DATA"].isna().sum()
             if datas_invalidas > 0:
-                avisos.append(f"{datas_invalidas} datas inválidas serão removidas")
-            
-            if datas_invalidas == len(df_temp):
-                erros.append("Todas as datas são inválidas")
+                avisos.append(f"Existem {datas_invalidas} data(s) inválida(s)")
         except Exception as e:
             erros.append(f"Erro ao processar datas: {str(e)}")
     
     return erros, avisos
 
 # ===========================
-# CONSOLIDAÇÃO - CENÁRIO B
+# FUNÇÕES DE ARQUIVO
 # ===========================
-def processar_substituicao_completa(df_novo, nome_arquivo, token):
-    """
-    CENÁRIO B: Substitui COMPLETAMENTE o arquivo consolidado
-    - Deleta todos os dados anteriores
-    - Cria arquivo novo com apenas os dados enviados
-    - Adiciona campo DATA_ULTIMO_ENVIO
-    - Faz backup automático antes de substituir
-    """
-    session_id = gerar_id_sessao()
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
+def salvar_arquivo_sharepoint(df, nome_arquivo, pasta, token):
+    """Salva DataFrame como Excel no SharePoint"""
     try:
-        status_text.info("Iniciando substituição completa...")
-        progress_bar.progress(5)
+        buffer = BytesIO()
         
-        # Verificar lock
-        sistema_ocupado, _ = verificar_lock_existente(token)
-        if sistema_ocupado:
-            status_text.error("Sistema ocupado por outro usuário")
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Dados', index=False)
+        
+        buffer.seek(0)
+        conteudo = buffer.read()
+        
+        url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{pasta}/{nome_arquivo}:/content"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+        
+        response = requests.put(url, headers=headers, data=conteudo, timeout=60)
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"Arquivo salvo: {nome_arquivo}")
+            return True
+        else:
+            logger.error(f"Erro ao salvar {nome_arquivo}: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Erro ao salvar arquivo: {e}")
+        return False
+
+# ===========================
+# PROCESSAMENTO
+# ===========================
+def processar_substituicao_completa(df, nome_arquivo_original, token):
+    """
+    Processa substituição completa do arquivo consolidado
+    """
+    try:
+        # 1. Criar lock
+        sucesso_lock, session_id = criar_lock(token, "Substituição completa")
+        if not sucesso_lock:
+            st.error("❌ Não foi possível criar lock. Sistema pode estar ocupado.")
             return False
         
-        # Criar lock
-        status_text.info("Bloqueando sistema...")
-        progress_bar.progress(10)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        lock_criado, session_lock = criar_lock(token, "Substituição completa do consolidado")
-        if not lock_criado:
-            status_text.error("Não foi possível bloquear o sistema")
-            return False
-        
-        # Fazer backup do consolidado atual
-        status_text.info("Fazendo backup do arquivo atual...")
+        # 2. Backup do arquivo atual
+        status_text.info("📦 Fazendo backup do arquivo atual...")
         progress_bar.progress(20)
         
-        backup_feito, registros_antigos = fazer_backup_consolidado(token)
-        if backup_feito:
-            st.info(f"Backup criado: {registros_antigos} registros salvos")
+        df_atual = baixar_arquivo_consolidado(token)
+        if df_atual is not None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome_backup = f"backup_bonificacao_{timestamp}.xlsx"
+            
+            if not salvar_arquivo_sharepoint(df_atual, nome_backup, PASTA_ENVIOS_BACKUPS, token):
+                st.warning("⚠️ Backup não foi salvo, mas continuando...")
+            else:
+                st.success(f"✅ Backup salvo: {nome_backup}")
+        else:
+            st.info("ℹ️ Nenhum arquivo anterior para backup")
         
-        # Preparar dados novos
-        status_text.info("Preparando dados...")
-        progress_bar.progress(35)
+        progress_bar.progress(40)
         
-        df_novo = df_novo.copy()
+        # 3. Preparar novos dados
+        status_text.info("🔄 Preparando novos dados...")
+        df_novo = df.copy()
+        
+        # Garantir que colunas estão em maiúsculas
         df_novo.columns = df_novo.columns.str.strip().str.upper()
         
-        # Converter datas
-        df_novo["DATA"] = pd.to_datetime(df_novo["DATA"], errors="coerce")
-        linhas_invalidas = df_novo["DATA"].isna().sum()
-        df_novo = df_novo.dropna(subset=["DATA"])
-        
-        if df_novo.empty:
-            status_text.error("Nenhum registro válido após limpeza de datas")
-            remover_lock(token, session_lock)
-            return False
-        
-        if linhas_invalidas > 0:
-            st.warning(f"{linhas_invalidas} linhas com datas inválidas foram removidas")
-        
-        # ADICIONAR CAMPO DATA_ULTIMO_ENVIO
-        status_text.info("Adicionando campo DATA_ULTIMO_ENVIO...")
-        progress_bar.progress(50)
-        
+        # Adicionar/atualizar DATA_ULTIMO_ENVIO
         data_envio = datetime.now()
-        df_novo['DATA_ULTIMO_ENVIO'] = data_envio
+        df_novo["DATA_ULTIMO_ENVIO"] = data_envio
         
-        logger.info(f"Campo DATA_ULTIMO_ENVIO adicionado: {data_envio.strftime('%d/%m/%Y %H:%M:%S')}")
+        progress_bar.progress(60)
         
-        # Ordenar dados
-        df_novo = df_novo.sort_values(
-            ["DATA", "LOJA"], 
-            na_position='last'
-        ).reset_index(drop=True)
+        # 4. Salvar cópia do arquivo enviado
+        status_text.info("💾 Salvando cópia do arquivo enviado...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nome_copia = f"enviado_{timestamp}_{nome_arquivo_original}"
         
-        # Salvar cópia do arquivo enviado
-        status_text.info("Salvando cópia do arquivo enviado...")
-        progress_bar.progress(65)
-        salvar_arquivo_enviado(df_novo, nome_arquivo, token)
+        salvar_arquivo_sharepoint(df_novo, nome_copia, PASTA_ENVIOS_BACKUPS, token)
+        st.success(f"✅ Cópia salva: {nome_copia}")
         
-        # Upload do novo consolidado (SUBSTITUIÇÃO TOTAL)
-        status_text.info("Salvando novo arquivo consolidado...")
         progress_bar.progress(80)
         
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_novo.to_excel(writer, index=False, sheet_name="Dados")
-        buffer.seek(0)
+        # 5. Salvar arquivo consolidado
+        status_text.info("💾 Salvando arquivo consolidado...")
         
-        sucesso = upload_onedrive("bonificacao_consolidada.xlsx", buffer.read(), token, "consolidado")
+        sucesso = salvar_arquivo_sharepoint(
+            df_novo,
+            "bonificacao_consolidada.xlsx",
+            PASTA_CONSOLIDADO,
+            token
+        )
         
-        # Remover lock
-        progress_bar.progress(95)
-        remover_lock(token, session_lock)
         progress_bar.progress(100)
         
+        # 6. Remover lock
+        remover_lock(token, session_id)
+        
         if sucesso:
-            status_text.empty()
+            status_text.success("✅ Arquivo consolidado atualizado com sucesso!")
             progress_bar.empty()
             
-            # Mensagem de sucesso
-            st.success("Substituição completa realizada com sucesso!")
-            
-            if backup_feito:
-                st.warning(f"O arquivo consolidado anterior ({registros_antigos} registros) foi substituído e salvo em backup")
-            else:
-                st.info("Arquivo consolidado criado (não havia arquivo anterior)")
-            
-            # Métricas do resultado
-            st.markdown("### Resultado da Operação")
+            # Exibir resumo
+            st.markdown("### 📊 Resumo da Substituição")
             
             col1, col2, col3 = st.columns(3)
             
@@ -599,11 +569,15 @@ def processar_substituicao_completa(df_novo, nome_arquivo, token):
                 st.metric("Data do Envio", data_envio.strftime("%d/%m/%Y %H:%M"))
             
             # Informação sobre o campo DATA_ULTIMO_ENVIO
-            st.info(f"Campo 'DATA_ULTIMO_ENVIO' adicionado com sucesso em todos os {len(df_novo)} registros")
+            st.info(f"✅ Campo 'DATA_ULTIMO_ENVIO' adicionado em todos os {len(df_novo)} registros")
+            
+            # Exibir informações sobre colunas se houver novas
+            if 'info_validacao' in st.session_state and st.session_state.info_validacao.get('colunas_novas'):
+                st.success(f"✅ Novas colunas adicionadas: {', '.join(st.session_state.info_validacao['colunas_novas'])}")
             
             # Resumo por loja
             if not df_novo.empty and 'LOJA' in df_novo.columns:
-                st.markdown("### Resumo por Loja")
+                st.markdown("### 📋 Resumo por Loja")
                 
                 resumo = df_novo.groupby("LOJA").agg({
                     "DATA": ["count", "min", "max"]
@@ -617,19 +591,19 @@ def processar_substituicao_completa(df_novo, nome_arquivo, token):
                 st.dataframe(resumo, use_container_width=True)
             
             # Localização dos arquivos
-            with st.expander("Localização dos Arquivos"):
+            with st.expander("📁 Localização dos Arquivos"):
                 st.info(f"**Arquivo Consolidado:**\n`{PASTA_CONSOLIDADO}/bonificacao_consolidada.xlsx`")
                 st.info(f"**Backups:**\n`{PASTA_ENVIOS_BACKUPS}/`")
             
             return True
         else:
-            status_text.error("Erro ao salvar arquivo consolidado")
+            status_text.error("❌ Erro ao salvar arquivo consolidado")
             return False
             
     except Exception as e:
         logger.error(f"Erro na substituição completa: {e}")
         remover_lock(token, session_id, force=True)
-        status_text.error(f"Erro durante o processo: {str(e)}")
+        status_text.error(f"❌ Erro durante o processo: {str(e)}")
         progress_bar.empty()
         st.error("Sistema liberado automaticamente após erro")
         return False
@@ -672,30 +646,30 @@ DRIVE_ID""")
         st.stop()
 
     # Sidebar
-    st.sidebar.markdown("### Upload de Bonificações")
+    st.sidebar.markdown("### 📤 Upload de Bonificações")
     st.sidebar.markdown(f"**Versão:** {APP_VERSION}")
     st.sidebar.divider()
 
     # Obter token
-    with st.spinner("Conectando ao Microsoft Graph..."):
+    with st.spinner("🔄 Conectando ao Microsoft Graph..."):
         token = obter_token()
     
     if not token:
-        st.error("Erro de autenticação. Verifique as credenciais nas secrets.")
+        st.error("❌ Erro de autenticação. Verifique as credenciais nas secrets.")
         st.sidebar.error("❌ Desconectado")
         st.stop()
     
     st.sidebar.success("✅ Conectado")
 
     # Status do sistema
-    st.markdown("## Status do Sistema")
+    st.markdown("## 🔍 Status do Sistema")
     sistema_ocupado = exibir_status_sistema(token)
     
     if sistema_ocupado:
         st.divider()
         if st.button("🔄 Atualizar Status"):
             st.rerun()
-        st.info("Página será atualizada automaticamente em 15 segundos")
+        st.info("⏱️ Página será atualizada automaticamente em 15 segundos")
         time.sleep(15)
         st.rerun()
 
@@ -704,8 +678,11 @@ DRIVE_ID""")
     # Avisos importantes
     st.warning("⚠️ **ATENÇÃO:** Este sistema faz SUBSTITUIÇÃO COMPLETA do arquivo consolidado. Todos os dados anteriores serão substituídos pelos novos dados enviados.")
     
-    st.info("""**Funcionalidades:**
+    st.info("""**✨ Funcionalidades:**
 - ✅ Substitui completamente o arquivo consolidado
+- ✅ Valida estrutura de colunas obrigatórias
+- ✅ Permite adição de novas colunas
+- ✅ Detecta mudanças nos nomes de colunas
 - ✅ Faz backup automático antes de substituir
 - ✅ Adiciona campo DATA_ULTIMO_ENVIO em todos os registros
 - ✅ Salva cópia do arquivo enviado
@@ -716,11 +693,17 @@ DRIVE_ID""")
         st.markdown(f"**Modo:** Substituição Completa")
         st.markdown(f"**Consolidado:** bonificacao_consolidada.xlsx")
         st.markdown(f"**Pasta:** {PASTA_CONSOLIDADO}")
+        
+        with st.expander("📋 Colunas Obrigatórias"):
+            st.markdown('<div class="column-list">', unsafe_allow_html=True)
+            for col in COLUNAS_OBRIGATORIAS:
+                st.text(f"• {col}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
     # Upload de arquivo
-    st.markdown("## Upload de Planilha Excel")
+    st.markdown("## 📤 Upload de Planilha Excel")
     
-    st.info("📋 A planilha deve ter uma aba 'Dados' com as colunas 'LOJA' e 'DATA'")
+    st.info("📋 A planilha deve ter uma aba 'Dados' com todas as colunas obrigatórias")
 
     uploaded_file = st.file_uploader(
         "Escolha um arquivo Excel", 
@@ -774,20 +757,50 @@ DRIVE_ID""")
     if df is not None:
         st.markdown("### 🔍 Validação dos Dados")
         
-        with st.spinner("Validando dados..."):
-            erros, avisos = validar_dados_enviados(df)
+        with st.spinner("🔄 Validando dados e estrutura..."):
+            erros, avisos = validar_dados_enviados(df, token)
         
         if erros:
-            st.error("❌ Problemas encontrados:")
+            st.error("❌ **Problemas encontrados:**")
             for erro in erros:
                 st.error(f"• {erro}")
+            
+            # Mostrar comparação de colunas se houver erro de estrutura
+            st.markdown("---")
+            st.markdown("### 📋 Comparação de Estrutura")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Colunas no seu arquivo:**")
+                st.markdown('<div class="validation-box">', unsafe_allow_html=True)
+                colunas_usuario = [col for col in df.columns if col != 'DATA_ULTIMO_ENVIO']
+                for col in sorted(colunas_usuario):
+                    st.text(f"• {col}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("**Colunas obrigatórias:**")
+                st.markdown('<div class="validation-box">', unsafe_allow_html=True)
+                for col in sorted(COLUNAS_OBRIGATORIAS):
+                    if col in df.columns:
+                        st.text(f"✅ {col}")
+                    else:
+                        st.text(f"❌ {col}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
             st.stop()
         else:
-            st.success("✅ Validação aprovada!")
+            st.success("✅ **Validação aprovada!**")
         
         if avisos:
+            st.markdown("### ℹ️ Informações Adicionais")
             for aviso in avisos:
-                st.info(f"ℹ️ {aviso}")
+                st.info(aviso)
+        
+        # Guardar info de validação para usar depois
+        erros_estrutura, avisos_estrutura, info_validacao = validar_estrutura_colunas(df, token)
+        st.session_state.info_validacao = info_validacao
         
         st.divider()
         
