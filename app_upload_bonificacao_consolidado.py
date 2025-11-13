@@ -8,14 +8,15 @@ import logging
 import json
 import uuid
 import time
+from dateutil.relativedelta import relativedelta
 
 # ===========================
 # CONFIGURAÇÕES DE VERSÃO
 # ===========================
-APP_VERSION = "2.0.0"
-VERSION_DATE = "2025-11-05"
-APP_TITLE = "Upload da planilha de  Bonificações"
-APP_SUBTITLE = "Substituição completa do arquivo consolidado"
+APP_VERSION = "3.0.0"
+VERSION_DATE = "2025-11-13"
+APP_TITLE = "Upload da planilha de Bonificações"
+APP_SUBTITLE = "Consolidação inteligente por loja e mês"
 
 # ===========================
 # CONFIGURAÇÃO DE LOGGING
@@ -140,6 +141,14 @@ def aplicar_estilos_css():
         border-radius: 5px;
         padding: 0.5rem;
     }
+    
+    .warning-box {
+        background: #fff3cd;
+        border-left: 4px solid var(--warning-color);
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 1rem 0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -215,7 +224,7 @@ def verificar_lock_existente(token):
         logger.error(f"Erro ao verificar lock: {e}")
         return False, None
 
-def criar_lock(token, operacao="Substituição completa"):
+def criar_lock(token, operacao="Consolidação por loja e mês"):
     """Cria um lock para bloquear outras operações"""
     try:
         session_id = gerar_id_sessao()
@@ -234,228 +243,248 @@ def criar_lock(token, operacao="Substituição completa"):
             "Content-Type": "application/json"
         }
         
-        response = requests.put(
-            url, 
-            headers=headers, 
-            data=json.dumps(lock_data), 
-            timeout=10
-        )
+        content = json.dumps(lock_data).encode('utf-8')
+        response = requests.put(url, headers=headers, data=content, timeout=10)
         
         if response.status_code in [200, 201]:
-            logger.info(f"Lock criado com sucesso. Session ID: {session_id}")
-            return True, session_id
+            logger.info(f"Lock criado: {session_id}")
+            return True
         
-        logger.error(f"Erro ao criar lock: {response.status_code}")
-        return False, None
-            
+        logger.error(f"Falha ao criar lock: {response.status_code}")
+        return False
+        
     except Exception as e:
         logger.error(f"Erro ao criar lock: {e}")
-        return False, None
+        return False
 
 def remover_lock(token, session_id=None, force=False):
     """Remove o lock do sistema"""
     try:
-        if not force and session_id:
-            lock_existe, lock_data = verificar_lock_existente(token)
-            if lock_existe and lock_data.get('session_id') != session_id:
-                logger.warning("Tentativa de remover lock de outra sessão")
-                return False
+        if not force:
+            ocupado, lock_data = verificar_lock_existente(token)
+            if ocupado and lock_data:
+                if session_id and lock_data.get("session_id") != session_id:
+                    logger.warning("Tentativa de remover lock de outra sessão")
+                    return False
         
         url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{ARQUIVO_LOCK}"
         headers = {"Authorization": f"Bearer {token}"}
         response = requests.delete(url, headers=headers, timeout=10)
         
-        if response.status_code in [200, 204, 404]:
+        if response.status_code in [204, 404]:
             logger.info("Lock removido com sucesso")
             return True
         
-        logger.error(f"Erro ao remover lock: {response.status_code}")
+        logger.error(f"Falha ao remover lock: {response.status_code}")
         return False
-            
+        
     except Exception as e:
         logger.error(f"Erro ao remover lock: {e}")
         return False
 
 def exibir_status_sistema(token):
-    """Exibe status atual do sistema"""
-    lock_existe, lock_data = verificar_lock_existente(token)
+    """Exibe o status atual do sistema e retorna se está ocupado"""
+    ocupado, lock_data = verificar_lock_existente(token)
     
-    if lock_existe:
+    if ocupado and lock_data:
         st.markdown('<div class="status-card error">', unsafe_allow_html=True)
-        st.error("🔒 Sistema ocupado - Operação em andamento")
+        st.error("🔒 **Sistema em uso** - Aguarde a conclusão da operação atual")
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"**Operação:** {lock_data.get('operacao', 'Desconhecida')}")
-            st.info(f"**Sessão ID:** {lock_data.get('session_id', 'N/A')}")
-        
+            st.metric("Operação", lock_data.get('operacao', 'N/A'))
         with col2:
-            timestamp = datetime.fromisoformat(lock_data.get('timestamp'))
+            timestamp = datetime.fromisoformat(lock_data['timestamp'])
             tempo_decorrido = datetime.now() - timestamp
-            minutos = int(tempo_decorrido.seconds / 60)
-            st.info(f"**Iniciado há:** {minutos} minuto(s)")
-            st.info(f"**Versão:** {lock_data.get('app_version', 'N/A')}")
+            minutos = int(tempo_decorrido.total_seconds() / 60)
+            st.metric("Tempo", f"{minutos} min")
+        with col3:
+            st.metric("Sessão", lock_data.get('session_id', 'N/A'))
         
         st.markdown('</div>', unsafe_allow_html=True)
         return True
     else:
         st.markdown('<div class="status-card success">', unsafe_allow_html=True)
-        st.success("✅ Sistema disponível")
+        st.success("✅ **Sistema disponível** - Pronto para processar")
         st.markdown('</div>', unsafe_allow_html=True)
         return False
 
 # ===========================
+# VALIDAÇÃO DE DATAS
+# ===========================
+def validar_datas(df):
+    """
+    Valida as datas da planilha
+    Retorna: (sucesso, erros, avisos, info)
+    """
+    erros = []
+    avisos = []
+    info = {}
+    
+    # Verifica se tem coluna DATA
+    if 'DATA' not in df.columns:
+        erros.append("Coluna DATA não encontrada na planilha")
+        return False, erros, avisos, info
+    
+    # Converter para datetime se necessário
+    try:
+        df['DATA'] = pd.to_datetime(df['DATA'], errors='coerce')
+    except Exception as e:
+        erros.append(f"Erro ao converter coluna DATA: {str(e)}")
+        return False, erros, avisos, info
+    
+    # Verificar datas nulas
+    datas_nulas = df['DATA'].isna().sum()
+    if datas_nulas > 0:
+        erros.append(f"Encontradas {datas_nulas} linhas com DATA vazia ou inválida")
+    
+    # Verificar se há datas válidas
+    if df['DATA'].notna().sum() == 0:
+        erros.append("Nenhuma data válida encontrada na planilha")
+        return False, erros, avisos, info
+    
+    # Data atual e limites
+    data_atual = datetime.now()
+    mes_atual = data_atual.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    mes_anterior = (mes_atual - relativedelta(months=1))
+    mes_proximo = (mes_atual + relativedelta(months=1))
+    limite_futuro = (mes_atual + relativedelta(months=2))  # Aceita até 2 meses no futuro
+    limite_passado = (mes_atual - relativedelta(months=6))  # Aceita até 6 meses no passado
+    
+    # Filtrar apenas datas válidas para análise
+    datas_validas = df[df['DATA'].notna()]['DATA']
+    
+    # Verificar datas muito futuras
+    datas_futuras = datas_validas[datas_validas > limite_futuro]
+    if len(datas_futuras) > 0:
+        datas_exemplo = datas_futuras.head(5).dt.strftime('%d/%m/%Y').tolist()
+        erros.append(f"⚠️ Encontradas {len(datas_futuras)} datas muito futuras (mais de 2 meses). Exemplos: {', '.join(datas_exemplo)}")
+    
+    # Verificar datas muito antigas
+    datas_antigas = datas_validas[datas_validas < limite_passado]
+    if len(datas_antigas) > 0:
+        datas_exemplo = datas_antigas.head(5).dt.strftime('%d/%m/%Y').tolist()
+        avisos.append(f"⚠️ Encontradas {len(datas_antigas)} datas antigas (mais de 6 meses atrás). Exemplos: {', '.join(datas_exemplo)}")
+    
+    # Identificar meses presentes nos dados
+    df['MES_ANO'] = df['DATA'].dt.to_period('M')
+    meses_unicos = df[df['DATA'].notna()]['MES_ANO'].unique()
+    
+    info['meses_presentes'] = sorted([str(m) for m in meses_unicos])
+    info['total_meses'] = len(meses_unicos)
+    info['data_minima'] = datas_validas.min()
+    info['data_maxima'] = datas_validas.max()
+    info['mes_atual'] = str(mes_atual.strftime('%Y-%m'))
+    
+    # Avisos sobre meses
+    if len(meses_unicos) > 1:
+        avisos.append(f"📅 Dados contêm {len(meses_unicos)} meses diferentes: {', '.join(info['meses_presentes'])}")
+    
+    # Verificar se tem dados do mês atual ou anterior
+    tem_mes_atual = any(df['MES_ANO'] == mes_atual.strftime('%Y-%m'))
+    tem_mes_anterior = any(df['MES_ANO'] == mes_anterior.strftime('%Y-%m'))
+    
+    if tem_mes_atual:
+        avisos.append(f"✅ Dados contêm informações do mês atual ({mes_atual.strftime('%m/%Y')})")
+    if tem_mes_anterior:
+        avisos.append(f"✅ Dados contêm informações do mês anterior ({mes_anterior.strftime('%m/%Y')})")
+    
+    # Remover coluna auxiliar antes de retornar
+    df.drop('MES_ANO', axis=1, inplace=True, errors='ignore')
+    
+    sucesso = len(erros) == 0
+    return sucesso, erros, avisos, info
+
+# ===========================
 # VALIDAÇÃO DE ESTRUTURA
 # ===========================
-def baixar_arquivo_consolidado(token):
-    """Baixa o arquivo consolidado atual para comparação de estrutura"""
+def validar_estrutura_colunas(df, token):
+    """Valida a estrutura de colunas do DataFrame"""
+    erros = []
+    avisos = []
+    info = {}
+    
+    colunas_usuario = [col for col in df.columns if col != 'DATA_ULTIMO_ENVIO']
+    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in df.columns]
+    colunas_novas = [col for col in colunas_usuario if col not in COLUNAS_OBRIGATORIAS]
+    
+    info['colunas_usuario'] = colunas_usuario
+    info['colunas_faltando'] = colunas_faltando
+    info['colunas_novas'] = colunas_novas
+    
+    if colunas_faltando:
+        erros.append(f"❌ Colunas obrigatórias ausentes: {', '.join(colunas_faltando)}")
+    
+    if colunas_novas:
+        avisos.append(f"ℹ️ Novas colunas detectadas: {', '.join(colunas_novas)}")
+    
+    return erros, avisos, info
+
+# ===========================
+# VALIDAÇÃO COMPLETA
+# ===========================
+def validar_dados_enviados(df, token):
+    """Validação completa dos dados enviados"""
+    erros_totais = []
+    avisos_totais = []
+    
+    # 1. Validar estrutura de colunas
+    erros_estrutura, avisos_estrutura, info_estrutura = validar_estrutura_colunas(df, token)
+    erros_totais.extend(erros_estrutura)
+    avisos_totais.extend(avisos_estrutura)
+    
+    # 2. Validar datas
+    sucesso_datas, erros_datas, avisos_datas, info_datas = validar_datas(df)
+    erros_totais.extend(erros_datas)
+    avisos_totais.extend(avisos_datas)
+    
+    # Guardar info de datas no session_state
+    if 'info_datas' not in st.session_state:
+        st.session_state.info_datas = {}
+    st.session_state.info_datas = info_datas
+    
+    # 3. Validar LOJA
+    if 'LOJA' in df.columns:
+        lojas_nulas = df['LOJA'].isna().sum()
+        if lojas_nulas > 0:
+            erros_totais.append(f"❌ Encontradas {lojas_nulas} linhas sem LOJA definida")
+        
+        lojas_unicas = df['LOJA'].dropna().unique()
+        avisos_totais.append(f"📍 Dados contêm {len(lojas_unicas)} lojas diferentes")
+    else:
+        erros_totais.append("❌ Coluna LOJA não encontrada")
+    
+    return erros_totais, avisos_totais
+
+# ===========================
+# DOWNLOAD DE ARQUIVO
+# ===========================
+def download_arquivo_sharepoint(token, nome_arquivo):
+    """Faz download de um arquivo do SharePoint"""
     try:
-        url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/bonificacao_consolidada.xlsx:/content"
+        url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{PASTA_CONSOLIDADO}/{nome_arquivo}:/content"
         headers = {"Authorization": f"Bearer {token}"}
         response = requests.get(url, headers=headers, timeout=30)
         
         if response.status_code == 200:
-            return pd.read_excel(BytesIO(response.content), sheet_name='Dados')
+            return BytesIO(response.content)
+        elif response.status_code == 404:
+            logger.warning(f"Arquivo não encontrado: {nome_arquivo}")
+            return None
         else:
-            logger.warning(f"Arquivo consolidado não encontrado: {response.status_code}")
+            logger.error(f"Erro ao baixar arquivo: {response.status_code}")
             return None
             
     except Exception as e:
-        logger.error(f"Erro ao baixar arquivo consolidado: {e}")
+        logger.error(f"Erro no download: {e}")
         return None
 
-def validar_estrutura_colunas(df_novo, token):
-    """
-    Valida a estrutura de colunas do arquivo enviado
-    Retorna: (erros, avisos, info_validacao)
-    """
-    erros = []
-    avisos = []
-    info_validacao = {
-        'colunas_faltando': [],
-        'colunas_diferentes': [],
-        'colunas_novas': [],
-        'estrutura_ok': False
-    }
-    
-    # Normalizar colunas do novo arquivo
-    colunas_novo = [col.strip().upper() for col in df_novo.columns]
-    
-    # 1. Verificar colunas obrigatórias
-    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in colunas_novo]
-    
-    if colunas_faltando:
-        erros.append(f"❌ Colunas obrigatórias faltando: {', '.join(colunas_faltando)}")
-        info_validacao['colunas_faltando'] = colunas_faltando
-        return erros, avisos, info_validacao
-    
-    # 2. Baixar arquivo consolidado atual para comparar estrutura
-    df_consolidado = baixar_arquivo_consolidado(token)
-    
-    if df_consolidado is not None:
-        colunas_consolidado = [col.strip().upper() for col in df_consolidado.columns]
-        
-        # Remover DATA_ULTIMO_ENVIO da comparação (é adicionada automaticamente)
-        colunas_consolidado_sem_data = [col for col in colunas_consolidado if col != 'DATA_ULTIMO_ENVIO']
-        
-        # 3. Verificar mudanças nos nomes de colunas existentes
-        colunas_diferentes = []
-        for col in colunas_consolidado_sem_data:
-            if col in COLUNAS_OBRIGATORIAS and col not in colunas_novo:
-                colunas_diferentes.append(col)
-        
-        if colunas_diferentes:
-            erros.append(f"❌ As seguintes colunas mudaram de nome ou estão ausentes: {', '.join(colunas_diferentes)}")
-            info_validacao['colunas_diferentes'] = colunas_diferentes
-            return erros, avisos, info_validacao
-        
-        # 4. Identificar novas colunas (permitidas)
-        colunas_novas = [col for col in colunas_novo if col not in colunas_consolidado_sem_data and col != 'DATA_ULTIMO_ENVIO']
-        
-        if colunas_novas:
-            avisos.append(f"ℹ️ Novas colunas detectadas (serão adicionadas): {', '.join(colunas_novas)}")
-            info_validacao['colunas_novas'] = colunas_novas
-    
-    else:
-        # Arquivo consolidado não existe ainda, apenas validar colunas obrigatórias
-        avisos.append("⚠️ Arquivo consolidado não existe. Será criado pela primeira vez.")
-        
-        # Verificar se há colunas além das obrigatórias
-        colunas_extras = [col for col in colunas_novo if col not in COLUNAS_OBRIGATORIAS and col != 'DATA_ULTIMO_ENVIO']
-        if colunas_extras:
-            avisos.append(f"ℹ️ Colunas adicionais no arquivo: {', '.join(colunas_extras)}")
-            info_validacao['colunas_novas'] = colunas_extras
-    
-    info_validacao['estrutura_ok'] = True
-    return erros, avisos, info_validacao
-
-def validar_dados_enviados(df, token):
-    """
-    Valida os dados enviados
-    Retorna: (erros, avisos)
-    """
-    erros = []
-    avisos = []
-    
-    # Normalizar nomes das colunas
-    df.columns = df.columns.str.strip().str.upper()
-    
-    # 1. Validar estrutura de colunas
-    erros_estrutura, avisos_estrutura, info_validacao = validar_estrutura_colunas(df, token)
-    erros.extend(erros_estrutura)
-    avisos.extend(avisos_estrutura)
-    
-    if not info_validacao['estrutura_ok']:
-        return erros, avisos
-    
-    # 2. Verificar se DataFrame está vazio
-    if df.empty:
-        erros.append("Planilha está vazia")
-        return erros, avisos
-    
-    # 3. Verificar colunas essenciais para operação
-    if "LOJA" not in df.columns:
-        erros.append("Coluna 'LOJA' não encontrada")
-    
-    if "DATA" not in df.columns:
-        erros.append("Coluna 'DATA' não encontrada")
-    
-    # 4. Validações adicionais se as colunas existem
-    if "LOJA" in df.columns:
-        lojas_vazias = df["LOJA"].isna().sum()
-        if lojas_vazias > 0:
-            avisos.append(f"Existem {lojas_vazias} linha(s) sem LOJA identificada")
-    
-    if "DATA" in df.columns:
-        datas_vazias = df["DATA"].isna().sum()
-        if datas_vazias > 0:
-            avisos.append(f"Existem {datas_vazias} linha(s) sem DATA")
-        
-        # Tentar converter DATA para datetime
-        try:
-            df["DATA"] = pd.to_datetime(df["DATA"], errors='coerce')
-            datas_invalidas = df["DATA"].isna().sum()
-            if datas_invalidas > 0:
-                avisos.append(f"Existem {datas_invalidas} data(s) inválida(s)")
-        except Exception as e:
-            erros.append(f"Erro ao processar datas: {str(e)}")
-    
-    return erros, avisos
-
 # ===========================
-# FUNÇÕES DE ARQUIVO
+# UPLOAD DE ARQUIVO
 # ===========================
-def salvar_arquivo_sharepoint(df, nome_arquivo, pasta, token):
-    """Salva DataFrame como Excel no SharePoint"""
+def upload_arquivo_sharepoint(token, nome_arquivo, conteudo, pasta):
+    """Faz upload de um arquivo para o SharePoint"""
     try:
-        buffer = BytesIO()
-        
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Dados', index=False)
-        
-        buffer.seek(0)
-        conteudo = buffer.read()
-        
         url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/root:/{pasta}/{nome_arquivo}:/content"
         headers = {
             "Authorization": f"Bearer {token}",
@@ -465,143 +494,200 @@ def salvar_arquivo_sharepoint(df, nome_arquivo, pasta, token):
         response = requests.put(url, headers=headers, data=conteudo, timeout=60)
         
         if response.status_code in [200, 201]:
-            logger.info(f"Arquivo salvo: {nome_arquivo}")
+            logger.info(f"Arquivo enviado: {nome_arquivo}")
             return True
         else:
-            logger.error(f"Erro ao salvar {nome_arquivo}: {response.status_code}")
+            logger.error(f"Erro no upload: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:
-        logger.error(f"Erro ao salvar arquivo: {e}")
+        logger.error(f"Erro no upload: {e}")
         return False
 
 # ===========================
-# PROCESSAMENTO
+# CONSOLIDAÇÃO INTELIGENTE
 # ===========================
-def processar_substituicao_completa(df, nome_arquivo_original, token):
+def processar_consolidacao_inteligente(df_novo, nome_arquivo_original, token):
     """
-    Processa substituição completa do arquivo consolidado
+    Processa a consolidação inteligente:
+    - Identifica lojas e meses nos novos dados
+    - Remove registros da mesma loja E mês do consolidado
+    - Adiciona os novos registros
+    - Preserva todos os outros dados
     """
+    session_id = gerar_id_sessao()
+    
     try:
-        # 1. Criar lock
-        sucesso_lock, session_id = criar_lock(token, "Substituição completa")
-        if not sucesso_lock:
-            st.error("❌ Não foi possível criar lock. Sistema pode estar ocupado.")
+        # Criar lock
+        st.info("🔒 Bloqueando sistema para consolidação...")
+        if not criar_lock(token, "Consolidação por loja e mês"):
+            st.error("❌ Não foi possível bloquear o sistema. Tente novamente.")
             return False
         
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 2. Backup do arquivo atual
-        status_text.info("📦 Fazendo backup do arquivo atual...")
+        # 1. Download do arquivo consolidado
+        status_text.info("📥 Baixando arquivo consolidado...")
+        progress_bar.progress(10)
+        
+        arquivo_consolidado = download_arquivo_sharepoint(token, "bonificacao_consolidada.xlsx")
+        
+        if arquivo_consolidado is None:
+            status_text.warning("⚠️ Arquivo consolidado não existe. Criando novo arquivo...")
+            df_consolidado = pd.DataFrame()
+        else:
+            df_consolidado = pd.read_excel(arquivo_consolidado, sheet_name="Dados")
+            df_consolidado.columns = df_consolidado.columns.str.strip().str.upper()
+            status_text.success(f"✅ Arquivo consolidado carregado: {len(df_consolidado)} registros")
+        
         progress_bar.progress(20)
         
-        df_atual = baixar_arquivo_consolidado(token)
-        if df_atual is not None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            nome_backup = f"backup_bonificacao_{timestamp}.xlsx"
-            
-            if not salvar_arquivo_sharepoint(df_atual, nome_backup, PASTA_ENVIOS_BACKUPS, token):
-                st.warning("⚠️ Backup não foi salvo, mas continuando...")
-            else:
-                st.success(f"✅ Backup salvo: {nome_backup}")
-        else:
-            st.info("ℹ️ Nenhum arquivo anterior para backup")
+        # 2. Preparar dados novos
+        status_text.info("🔄 Preparando novos dados...")
+        df_novo_processado = df_novo.copy()
+        
+        # Adicionar DATA_ULTIMO_ENVIO
+        df_novo_processado['DATA_ULTIMO_ENVIO'] = datetime.now()
+        
+        # Garantir que DATA está em datetime
+        df_novo_processado['DATA'] = pd.to_datetime(df_novo_processado['DATA'])
+        
+        # Criar coluna MES_ANO para identificação
+        df_novo_processado['MES_ANO'] = df_novo_processado['DATA'].dt.to_period('M').astype(str)
+        
+        progress_bar.progress(30)
+        
+        # 3. Identificar lojas e meses nos novos dados
+        status_text.info("🔍 Identificando lojas e meses a serem atualizados...")
+        
+        lojas_meses_novos = df_novo_processado[['LOJA', 'MES_ANO']].drop_duplicates()
+        
+        total_combinacoes = len(lojas_meses_novos)
+        st.info(f"📊 Serão atualizados dados de {total_combinacoes} combinações de loja/mês")
+        
+        # Exibir detalhes
+        with st.expander("📋 Detalhes das atualizações", expanded=True):
+            summary = df_novo_processado.groupby(['LOJA', 'MES_ANO']).size().reset_index(name='Quantidade')
+            st.dataframe(summary, use_container_width=True)
         
         progress_bar.progress(40)
         
-        # 3. Preparar novos dados
-        status_text.info("🔄 Preparando novos dados...")
-        df_novo = df.copy()
-        
-        # Garantir que colunas estão em maiúsculas
-        df_novo.columns = df_novo.columns.str.strip().str.upper()
-        
-        # Adicionar/atualizar DATA_ULTIMO_ENVIO
-        data_envio = datetime.now()
-        df_novo["DATA_ULTIMO_ENVIO"] = data_envio
+        # 4. Remover registros antigos das mesmas lojas/meses
+        if len(df_consolidado) > 0:
+            status_text.info("🗑️ Removendo registros antigos das mesmas lojas/meses...")
+            
+            # Garantir que consolidado também tem MES_ANO
+            df_consolidado['DATA'] = pd.to_datetime(df_consolidado['DATA'])
+            df_consolidado['MES_ANO'] = df_consolidado['DATA'].dt.to_period('M').astype(str)
+            
+            registros_antes = len(df_consolidado)
+            
+            # Criar condição para manter apenas registros que NÃO estão sendo atualizados
+            condicao_manter = True
+            for _, row in lojas_meses_novos.iterrows():
+                loja = row['LOJA']
+                mes_ano = row['MES_ANO']
+                condicao_manter = condicao_manter & ~((df_consolidado['LOJA'] == loja) & (df_consolidado['MES_ANO'] == mes_ano))
+            
+            df_consolidado_filtrado = df_consolidado[condicao_manter].copy()
+            registros_removidos = registros_antes - len(df_consolidado_filtrado)
+            
+            st.success(f"✅ {registros_removidos} registros antigos removidos")
+            st.info(f"📊 {len(df_consolidado_filtrado)} registros preservados de outros meses/lojas")
+        else:
+            df_consolidado_filtrado = pd.DataFrame()
+            st.info("ℹ️ Não há dados consolidados anteriores")
         
         progress_bar.progress(60)
         
-        # 4. Salvar cópia do arquivo enviado
-        status_text.info("💾 Salvando cópia do arquivo enviado...")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nome_copia = f"enviado_{timestamp}_{nome_arquivo_original}"
+        # 5. Combinar dados
+        status_text.info("🔄 Combinando dados...")
         
-        salvar_arquivo_sharepoint(df_novo, nome_copia, PASTA_ENVIOS_BACKUPS, token)
-        st.success(f"✅ Cópia salva: {nome_copia}")
+        # Remover coluna auxiliar MES_ANO antes de consolidar
+        df_novo_processado.drop('MES_ANO', axis=1, inplace=True, errors='ignore')
+        if len(df_consolidado_filtrado) > 0:
+            df_consolidado_filtrado.drop('MES_ANO', axis=1, inplace=True, errors='ignore')
+        
+        if len(df_consolidado_filtrado) > 0:
+            df_final = pd.concat([df_consolidado_filtrado, df_novo_processado], ignore_index=True)
+        else:
+            df_final = df_novo_processado
+        
+        st.success(f"✅ Consolidação concluída: {len(df_final)} registros totais")
+        
+        progress_bar.progress(70)
+        
+        # 6. Criar backup do arquivo anterior (se existir)
+        if arquivo_consolidado is not None:
+            status_text.info("💾 Criando backup do arquivo anterior...")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome_backup = f"BACKUP_bonificacao_{timestamp}.xlsx"
+            
+            if upload_arquivo_sharepoint(token, nome_backup, arquivo_consolidado.getvalue(), PASTA_ENVIOS_BACKUPS):
+                st.success(f"✅ Backup criado: {nome_backup}")
+            else:
+                st.warning("⚠️ Não foi possível criar backup, mas continuando...")
         
         progress_bar.progress(80)
         
-        # 5. Salvar arquivo consolidado
-        status_text.info("💾 Salvando arquivo consolidado...")
+        # 7. Salvar arquivo consolidado atualizado
+        status_text.info("💾 Salvando arquivo consolidado atualizado...")
         
-        sucesso = salvar_arquivo_sharepoint(
-            df_novo,
-            "bonificacao_consolidada.xlsx",
-            PASTA_CONSOLIDADO,
-            token
-        )
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_final.to_excel(writer, sheet_name='Dados', index=False)
+        output.seek(0)
         
-        progress_bar.progress(100)
+        if not upload_arquivo_sharepoint(token, "bonificacao_consolidada.xlsx", output.getvalue(), PASTA_CONSOLIDADO):
+            status_text.error("❌ Erro ao salvar arquivo consolidado")
+            remover_lock(token, session_id, force=True)
+            return False
         
-        # 6. Remover lock
+        st.success("✅ Arquivo consolidado atualizado com sucesso!")
+        
+        progress_bar.progress(90)
+        
+        # 8. Salvar cópia do arquivo enviado
+        status_text.info("💾 Salvando cópia do arquivo enviado...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nome_copia = f"ENVIO_{timestamp}_{nome_arquivo_original}"
+        
+        output_copia = BytesIO()
+        with pd.ExcelWriter(output_copia, engine='openpyxl') as writer:
+            df_novo.to_excel(writer, sheet_name='Dados', index=False)
+        output_copia.seek(0)
+        
+        if upload_arquivo_sharepoint(token, nome_copia, output_copia.getvalue(), PASTA_ENVIOS_BACKUPS):
+            st.success(f"✅ Cópia salva: {nome_copia}")
+        
+        progress_bar.progress(95)
+        
+        # 9. Remover lock
+        status_text.info("🔓 Liberando sistema...")
         remover_lock(token, session_id)
         
-        if sucesso:
-            status_text.success("✅ Arquivo consolidado atualizado com sucesso!")
-            progress_bar.empty()
-            
-            # Exibir resumo
-            st.markdown("### 📊 Resumo da Substituição")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total de Registros", f"{len(df_novo):,}")
-            
-            with col2:
-                if "LOJA" in df_novo.columns:
-                    lojas_total = df_novo["LOJA"].dropna().nunique()
-                    st.metric("Total de Lojas", lojas_total)
-            
-            with col3:
-                st.metric("Data do Envio", data_envio.strftime("%d/%m/%Y %H:%M"))
-            
-            # Informação sobre o campo DATA_ULTIMO_ENVIO
-            st.info(f"✅ Campo 'DATA_ULTIMO_ENVIO' adicionado em todos os {len(df_novo)} registros")
-            
-            # Exibir informações sobre colunas se houver novas
-            if 'info_validacao' in st.session_state and st.session_state.info_validacao.get('colunas_novas'):
-                st.success(f"✅ Novas colunas adicionadas: {', '.join(st.session_state.info_validacao['colunas_novas'])}")
-            
-            # Resumo por loja
-            if not df_novo.empty and 'LOJA' in df_novo.columns:
-                st.markdown("### 📋 Resumo por Loja")
-                
-                resumo = df_novo.groupby("LOJA").agg({
-                    "DATA": ["count", "min", "max"]
-                })
-                resumo.columns = ["Total Registros", "Data Inicial", "Data Final"]
-                
-                # Formatar datas
-                resumo["Data Inicial"] = pd.to_datetime(resumo["Data Inicial"]).dt.strftime("%d/%m/%Y")
-                resumo["Data Final"] = pd.to_datetime(resumo["Data Final"]).dt.strftime("%d/%m/%Y")
-                
-                st.dataframe(resumo, use_container_width=True)
-            
-            # Localização dos arquivos
-            with st.expander("📁 Localização dos Arquivos"):
-                st.info(f"**Arquivo Consolidado:**\n`{PASTA_CONSOLIDADO}/bonificacao_consolidada.xlsx`")
-                st.info(f"**Backups:**\n`{PASTA_ENVIOS_BACKUPS}/`")
-            
-            return True
-        else:
-            status_text.error("❌ Erro ao salvar arquivo consolidado")
-            return False
-            
+        progress_bar.progress(100)
+        status_text.success("✅ Processo concluído com sucesso!")
+        
+        # Exibir resumo final
+        st.markdown("---")
+        st.markdown("### 📊 Resumo da Consolidação")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Registros Novos", len(df_novo))
+        with col2:
+            st.metric("Registros Removidos", registros_removidos if 'registros_removidos' in locals() else 0)
+        with col3:
+            st.metric("Registros Preservados", len(df_consolidado_filtrado) if len(df_consolidado_filtrado) > 0 else 0)
+        with col4:
+            st.metric("Total Final", len(df_final))
+        
+        return True
+        
     except Exception as e:
-        logger.error(f"Erro na substituição completa: {e}")
+        logger.error(f"Erro na consolidação: {e}")
         remover_lock(token, session_id, force=True)
         status_text.error(f"❌ Erro durante o processo: {str(e)}")
         progress_bar.empty()
@@ -676,21 +762,46 @@ DRIVE_ID""")
     st.divider()
 
     # Avisos importantes
-    st.warning("⚠️ **ATENÇÃO:** Este sistema faz SUBSTITUIÇÃO COMPLETA do arquivo consolidado. Todos os dados anteriores serão substituídos pelos novos dados enviados.")
+    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+    st.markdown("""
+    ### ⚠️ ATENÇÃO - Nova Lógica de Consolidação
+    
+    **Este sistema agora funciona de forma INTELIGENTE:**
+    
+    ✅ **Consolidação Seletiva por Loja e Mês**
+    - Identifica a LOJA e o MÊS de cada registro enviado
+    - Remove APENAS os registros do consolidado que têm a mesma LOJA e mesmo MÊS
+    - Adiciona os novos registros
+    - **PRESERVA todos os outros dados** (outras lojas ou outros meses)
+    
+    ✅ **Validação de Datas**
+    - Verifica se as datas estão em formato válido
+    - Alerta sobre datas muito futuras (mais de 2 meses à frente)
+    - Alerta sobre datas muito antigas (mais de 6 meses atrás)
+    
+    📌 **Exemplo prático:**
+    Se você enviar dados da "LOJA A" referente a "Janeiro/2025", o sistema irá:
+    1. Remover apenas os registros antigos da "LOJA A" de "Janeiro/2025"
+    2. Manter todos os dados da "LOJA A" de outros meses
+    3. Manter todos os dados de outras lojas
+    4. Adicionar os novos dados enviados
+    """)
+    st.markdown('</div>', unsafe_allow_html=True)
     
     st.info("""**✨ Funcionalidades:**
-- ✅ Substitui completamente o arquivo consolidado
+- ✅ Validação completa de datas
+- ✅ Consolidação inteligente por loja e mês
+- ✅ Preserva dados de outros meses e lojas
 - ✅ Valida estrutura de colunas obrigatórias
 - ✅ Permite adição de novas colunas
-- ✅ Detecta mudanças nos nomes de colunas
-- ✅ Faz backup automático antes de substituir
+- ✅ Faz backup automático antes de consolidar
 - ✅ Adiciona campo DATA_ULTIMO_ENVIO em todos os registros
 - ✅ Salva cópia do arquivo enviado
     """)
 
     # Informações do sistema
     with st.sidebar.expander("ℹ️ Informações"):
-        st.markdown(f"**Modo:** Substituição Completa")
+        st.markdown(f"**Modo:** Consolidação Inteligente")
         st.markdown(f"**Consolidado:** bonificacao_consolidada.xlsx")
         st.markdown(f"**Pasta:** {PASTA_CONSOLIDADO}")
         
@@ -798,9 +909,25 @@ DRIVE_ID""")
             for aviso in avisos:
                 st.info(aviso)
         
-        # Guardar info de validação para usar depois
-        erros_estrutura, avisos_estrutura, info_validacao = validar_estrutura_colunas(df, token)
-        st.session_state.info_validacao = info_validacao
+        # Mostrar informações sobre os meses que serão atualizados
+        if 'info_datas' in st.session_state and st.session_state.info_datas:
+            info_datas = st.session_state.info_datas
+            
+            st.markdown("---")
+            st.markdown("### 📅 Resumo dos Dados a Serem Consolidados")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Meses Diferentes", info_datas.get('total_meses', 0))
+            with col2:
+                if 'data_minima' in info_datas:
+                    st.metric("Data Mínima", info_datas['data_minima'].strftime('%d/%m/%Y'))
+            with col3:
+                if 'data_maxima' in info_datas:
+                    st.metric("Data Máxima", info_datas['data_maxima'].strftime('%d/%m/%Y'))
+            
+            if 'meses_presentes' in info_datas:
+                st.info(f"**Meses identificados:** {', '.join(info_datas['meses_presentes'])}")
         
         st.divider()
         
@@ -808,10 +935,10 @@ DRIVE_ID""")
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            if st.button("⚠️Consilidar dados", type="primary", use_container_width=True):
+            if st.button("🔄 Consolidar Dados (Inteligente)", type="primary", use_container_width=True):
                 st.warning("⏳ Consolidação iniciada! NÃO feche esta página!")
                 
-                sucesso = processar_substituicao_completa(df, uploaded_file.name, token)
+                sucesso = processar_consolidacao_inteligente(df, uploaded_file.name, token)
                 
                 if sucesso:
                     st.balloons()
@@ -826,7 +953,7 @@ DRIVE_ID""")
     st.markdown(f"""
     <div style="text-align: center; padding: 1rem; color: #666;">
         <strong>{APP_TITLE} v{APP_VERSION}</strong><br>
-        <small>Modo: Substituição Completa | Última atualização: {VERSION_DATE}</small>
+        <small>Modo: Consolidação Inteligente | Última atualização: {VERSION_DATE}</small>
     </div>
     """, unsafe_allow_html=True)
 
